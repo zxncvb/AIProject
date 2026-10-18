@@ -1,0 +1,21 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: enterprise-ai-backend
+  namespace: enterprise-ai
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: enterprise-ai-backend
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: enterprise-ai-worker-gpu
+  namespace: enterprise-ai
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: enterprise-ai-worker-gpu

@@ -1,0 +1,27 @@
+groups:
+  - name: enterprise-ai-platform
+    rules:
+      - alert: EnterpriseAIBackendDown
+        expr: up{job="enterprise-ai-backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "企业 AI 中台后端不可用"
+          description: "后端指标抓取连续两分钟失败。"
+      - alert: EnterpriseAIWorkflowFailureRateHigh
+        expr: sum(rate(ai_platform_workflow_runs_total{status="failed"}[5m])) / clamp_min(sum(rate(ai_platform_workflow_runs_total[5m])), 1) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "工作流失败率过高"
+          description: "最近 10 分钟工作流失败率超过 10%。"
+      - alert: EnterpriseAILLMErrorRateHigh
+        expr: sum(rate(ai_platform_llm_calls_total{status="error"}[5m])) / clamp_min(sum(rate(ai_platform_llm_calls_total[5m])), 1) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "模型调用错误率过高"
+          description: "最近 10 分钟模型调用错误率超过 10%。"

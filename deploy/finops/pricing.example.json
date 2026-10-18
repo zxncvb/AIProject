@@ -1,0 +1,11 @@
+{
+  "currency": "CNY",
+  "token_price_per_1k": 0.02,
+  "gpu_price_per_second": 0.0005,
+  "cpu_price_per_second": 0.00001,
+  "departments": {
+    "研发中心": "project-rd",
+    "客服中心": "project-service"
+  },
+  "budget_alert_percent": 80
+}

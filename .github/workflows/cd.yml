@@ -1,0 +1,92 @@
+name: enterprise-ai-platform-cd
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+permissions:
+  contents: read
+  packages: write
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        run: echo "tag=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: ${{ steps.meta.outputs.tag }}-backend
+      - uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          tags: ${{ steps.meta.outputs.tag }}-frontend
+  deploy:
+    needs: images
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+      - shell: bash
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "$KUBE_CONFIG_DATA" | base64 -d > "$HOME/.kube/config"
+          kubectl apply -k deploy/k8s
+          kubectl -n enterprise-ai delete job enterprise-ai-migrate --ignore-not-found
+          kubectl -n enterprise-ai create job enterprise-ai-migrate --image=${{ needs.images.outputs.tag }}-backend -- /usr/local/bin/alembic -c /app/alembic.ini upgrade head
+          kubectl -n enterprise-ai set env job/enterprise-ai-migrate --from=secret/enterprise-ai-secrets
+          kubectl -n enterprise-ai wait --for=condition=complete job/enterprise-ai-migrate --timeout=180s
+          kubectl -n enterprise-ai set image deployment/enterprise-ai-backend backend=${{ needs.images.outputs.tag }}-backend
+          kubectl -n enterprise-ai set image deployment/enterprise-ai-worker-gpu worker=${{ needs.images.outputs.tag }}-backend
+          kubectl -n enterprise-ai set image deployment/enterprise-ai-frontend frontend=${{ needs.images.outputs.tag }}-frontend
+          kubectl -n enterprise-ai rollout status deployment/enterprise-ai-backend --timeout=180s
+          kubectl -n enterprise-ai rollout status deployment/enterprise-ai-frontend --timeout=180s
+  evaluation:
+    needs: deploy
+    if: github.ref == 'refs/heads/main' && vars.EVALUATION_BASE_URL != '' && vars.EVALUATION_DATASET_PATH != ''
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: 下载评测集
+        shell: bash
+        env:
+          DATASET_URL: ${{ vars.EVALUATION_DATASET_URL }}
+        run: |
+          if [ -n "$DATASET_URL" ]; then curl --fail --location "$DATASET_URL" --output deploy/ci/evaluation-dataset.json; fi
+          test -s deploy/ci/evaluation-dataset.json
+      - name: 执行评测门禁
+        shell: pwsh
+        env:
+          EVALUATION_BASE_URL: ${{ vars.EVALUATION_BASE_URL }}
+          EVALUATION_TOKEN: ${{ secrets.EVALUATION_TOKEN }}
+          EVALUATION_DATASET_PATH: ${{ vars.EVALUATION_DATASET_PATH }}
+        run: ./deploy/ci/evaluation-gate.ps1 -BaseUrl $env:EVALUATION_BASE_URL -Token $env:EVALUATION_TOKEN -DatasetPath $env:EVALUATION_DATASET_PATH
+  rollback:
+    needs: [deploy, evaluation]
+    if: always() && github.ref == 'refs/heads/main' && vars.CANARY_WORKFLOW_ID != '' && (needs.deploy.result == 'failure' || needs.evaluation.result == 'failure')
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: 自动回滚灰度版本
+        shell: pwsh
+        env:
+          PLATFORM_BASE_URL: ${{ vars.EVALUATION_BASE_URL }}
+          PLATFORM_TOKEN: ${{ secrets.EVALUATION_TOKEN }}
+          CANARY_WORKFLOW_ID: ${{ vars.CANARY_WORKFLOW_ID }}
+          PROMETHEUS_URL: ${{ vars.PROMETHEUS_URL }}
+        run: ./deploy/ci/auto-rollback.ps1 -BaseUrl $env:PLATFORM_BASE_URL -Token $env:PLATFORM_TOKEN -WorkflowId $env:CANARY_WORKFLOW_ID -PrometheusUrl $env:PROMETHEUS_URL

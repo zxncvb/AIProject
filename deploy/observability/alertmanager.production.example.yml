@@ -1,0 +1,18 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: enterprise-webhook
+  group_by: [alertname, severity, tenant]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: enterprise-webhook
+    webhook_configs:
+      - url: "https://your-alert-gateway.example.com/prometheus"
+        send_resolved: true
+
+# 生产环境请把 URL 放到 Secret/ExternalSecret 管理的配置文件中，
+# 不要把飞书、钉钉、企业微信机器人地址提交到仓库。

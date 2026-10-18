@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: Enterprise AI Platform
+    orgId: 1
+    folder: Enterprise AI
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

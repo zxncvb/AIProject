@@ -1,0 +1,35 @@
+:root {
+  font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #132238;
+  background: #f4f7fb;
+}
+body { background: #f4f7fb; }
+button { border-color: #d7e0ec; color: #1b2a41; }
+button:hover { border-color: #8ba8cf; background: #f5f9ff; }
+.primary { background: #1769d1; border-color: #1769d1; color: #fff; }
+.primary:hover { background: #0d55b0; border-color: #0d55b0; color: #fff; }
+.login-page { background: radial-gradient(circle at 20% 0, #d6eaff, transparent 36%), #f3f8ff; }
+.brand-mark, .logo > span { background: linear-gradient(135deg, #0b63ce, #2d9bf0); }
+.login-kicker { margin-top: 18px; color: #6b88ac; font-size: 10px; font-weight: 800; letter-spacing: 1.5px; }
+.label-hint { color: #8a9bb0; font-size: 11px; font-weight: 400; }
+aside { background: #0b3b78; color: #e5f1ff; }
+.workspace-switcher { position: relative; margin: 4px 5px 21px; padding: 12px; border: 1px solid #2a629f; border-radius: 10px; background: #124a8f; }
+.workspace-switcher small, .workspace-switcher strong { display: block; }
+.workspace-switcher small { color: #9eb8d8; font-size: 11px; }
+.workspace-switcher strong { margin-top: 6px; font-size: 13px; max-width: 175px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-switcher span { position: absolute; right: 12px; bottom: 14px; color: #a8c7e8; }
+nav button:hover, nav button.active { background: #1d68bd; color: #fff; }
+.nav-caption { padding: 7px 13px 4px; color: #8eacd0; font-size: 10px; font-weight: 800; letter-spacing: 1.2px; }
+.admin-caption { margin-top: 17px; }
+.content header, .panel, .stat { border-color: #d8e7f7; }
+.home-banner { background: linear-gradient(110deg, #0b3b78, #146bd1 60%, #36a7ed); }
+.eyebrow.light { color: #c8e4ff; }
+.flow { border-color: #cfe0f3; }
+.notice { background: #e8f3ff; color: #145a9f; }
+.list-item.selected { background: #e8f3ff; border-color: #7bb2ed; }
+.list-icon, .asset-icon { background: #e5f1ff; color: #146bd1; }
+.tag.green { color: #145a9f; background: #e3f1ff; }
+.chat-box { margin-top: 18px; padding-top: 16px; border-top: 1px solid #e0ebf8; }
+.answer { margin-top: 12px; padding: 12px; border-left: 3px solid #146bd1; border-radius: 8px; background: #f1f7ff; line-height: 1.6; }
+.answer p { margin: 7px 0 0; }
+

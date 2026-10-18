@@ -1,0 +1,9 @@
+services:
+  backend:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://platform_runtime:${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD}@postgres:5432/platform
+      DATABASE_ADMIN_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/platform
+  worker:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://platform_runtime:${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD}@postgres:5432/platform
+      DATABASE_ADMIN_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/platform

@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: enterprise-ai
+  namespace: enterprise-ai
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 50m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [ai.example.com]
+      secretName: enterprise-ai-tls
+  rules:
+    - host: ai.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend: {service: {name: enterprise-ai-backend, port: {number: 8080}}}
+          - path: /
+            pathType: Prefix
+            backend: {service: {name: enterprise-ai-frontend, port: {number: 80}}}

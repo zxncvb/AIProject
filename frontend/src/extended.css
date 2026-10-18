@@ -1,0 +1,8 @@
+.three-col{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
+.file-button{display:inline-flex;align-items:center;gap:8px;border:1px solid #d7e0ec;background:#fff;color:#1b2a41;border-radius:8px;padding:9px 13px;cursor:pointer}
+.file-button input{display:none}
+.catalog-logo{width:36px;height:36px;display:grid;place-items:center;border-radius:10px;background:#e5f1ff;color:#1769d1;margin-bottom:10px}
+.check-list{display:grid;gap:8px}.check-item{display:flex;align-items:flex-start;gap:9px;padding:10px;border:1px solid #e1e8f0;border-radius:8px;background:#fbfdff;cursor:pointer}.check-item input{margin-top:4px}.check-item span{display:grid;gap:4px}.check-item small{color:#718198;overflow-wrap:anywhere}
+aside{overflow-y:auto}aside::-webkit-scrollbar{width:6px}aside::-webkit-scrollbar-thumb{background:#3c70aa;border-radius:6px}
+@media(max-width:1100px){.three-col{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.three-col{grid-template-columns:1fr}}

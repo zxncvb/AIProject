@@ -1,0 +1,12 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {"type": "timeseries", "title": "工作流运行速率", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}, "targets": [{"expr": "sum(rate(ai_platform_workflow_runs_total[5m])) by (status)", "legendFormat": "{{status}}"}]},
+    {"type": "timeseries", "title": "模型调用错误率", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}, "targets": [{"expr": "sum(rate(ai_platform_llm_calls_total{status=\"error\"}[5m])) / clamp_min(sum(rate(ai_platform_llm_calls_total[5m])), 1)", "legendFormat": "error rate"}]}
+  ],
+  "schemaVersion": 39,
+  "title": "企业 AI 中台运行总览",
+  "uid": "enterprise-ai-platform",
+  "version": 1
+}

@@ -1,0 +1,7 @@
+[
+  {
+    "workflow_id": "replace-with-workflow-id",
+    "input": {"question": "请输出健康检查"},
+    "expected_contains": ["健康"]
+  }
+]

@@ -1,0 +1,25 @@
+# Reference only: replace with operator-managed PostgreSQL/Redis/Qdrant before production.
+# Stateful failover requires synchronous replication, fencing and tested backups.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: platform-postgres
+  namespace: ai-platform
+spec:
+  instances: 3
+  storage:
+    size: 100Gi
+  bootstrap:
+    initdb:
+      database: platform
+      owner: platform
+---
+apiVersion: redis.redis.opstreelabs.in/v1beta2
+kind: RedisReplication
+metadata:
+  name: platform-redis
+  namespace: ai-platform
+spec:
+  clusterSize: 3
+  kubernetesConfig:
+    image: redis:7.4-alpine

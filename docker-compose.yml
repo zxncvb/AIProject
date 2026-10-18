@@ -1,0 +1,170 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}
+    volumes:
+      - platform-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - platform-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.2
+    volumes:
+      - platform-qdrant:/qdrant/storage
+    ports:
+      - "16333:6333"
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/rules:/etc/prometheus/rules:ro
+      - platform-prometheus:/prometheus
+    depends_on:
+      - backend
+    ports:
+      - "19090:9090"
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.8.2
+    command: ["-config.file=/etc/tempo/tempo.yml"]
+    volumes:
+      - ./deploy/observability/tempo.yml:/etc/tempo/tempo.yml:ro
+      - platform-tempo:/var/tempo
+    ports:
+      - "13200:3200"
+      - "14317:4317"
+      - "14318:4318"
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.5.5
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./deploy/observability/loki.yml:/etc/loki/loki.yml:ro
+      - platform-loki:/loki
+    ports:
+      - "13100:3100"
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.5.5
+    command: ["-config.file=/etc/promtail/promtail.yml"]
+    volumes:
+      - ./deploy/observability/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env or the shell}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - platform-grafana:/var/lib/grafana
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+    ports:
+      - "13001:3000"
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes:
+      - ./deploy/observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - platform-alertmanager:/alertmanager
+    ports:
+      - "19093:9093"
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}@postgres:5432/platform
+      DATABASE_ADMIN_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}@postgres:5432/platform
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318/v1/traces
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    volumes:
+      - platform-artifacts:/app/data
+    ports:
+      - "18080:8080"
+    restart: unless-stopped
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}@postgres:5432/platform
+      DATABASE_ADMIN_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}@postgres:5432/platform
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318/v1/traces
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    volumes:
+      - platform-artifacts:/app/data
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "13000:80"
+    restart: unless-stopped
+
+volumes:
+  platform-postgres:
+  platform-redis:
+  platform-artifacts:
+  platform-prometheus:
+  platform-alertmanager:
+  platform-qdrant:
+  platform-tempo:
+  platform-grafana:
+  platform-loki:

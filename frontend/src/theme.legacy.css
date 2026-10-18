@@ -1,0 +1,153 @@
+:root {
+  font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #12345b;
+  background: #f3f8ff;
+}
+
+body {
+  background: #f3f8ff;
+}
+
+button {
+  border-color: #c6d9ef;
+  color: #12345b;
+}
+
+button:hover {
+  border-color: #4d91df;
+  background: #f5f9ff;
+}
+
+.primary {
+  background: #146bd1;
+  border-color: #146bd1;
+}
+
+.primary:hover {
+  background: #0c58b3;
+  border-color: #0c58b3;
+  color: #fff;
+}
+
+.login-page {
+  background: radial-gradient(circle at 20% 0, #d6eaff, transparent 36%), #f3f8ff;
+}
+
+.brand-mark,
+.logo > span {
+  background: linear-gradient(135deg, #0b63ce, #2d9bf0);
+}
+
+aside {
+  background: #0b3b78;
+  color: #e5f1ff;
+}
+
+.tenant {
+  border-color: #2a629f;
+  background: #124a8f;
+}
+
+nav button:hover,
+nav button.active {
+  background: #1d68bd;
+}
+
+.content header,
+.panel,
+.stat {
+  border-color: #d8e7f7;
+}
+
+.hero {
+  background: linear-gradient(110deg, #0b3b78, #146bd1 60%, #36a7ed);
+}
+
+.flow {
+  border-color: #cfe0f3;
+}
+
+.notice {
+  background: #e8f3ff;
+  color: #145a9f;
+}
+
+.list-item.selected {
+  background: #e8f3ff;
+  border-color: #7bb2ed;
+}
+
+.list-icon {
+  background: #e5f1ff;
+  color: #146bd1;
+}
+
+.tag.green {
+  color: #145a9f;
+  background: #e3f1ff;
+}
+
+.chat-box {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #e0ebf8;
+}
+
+.answer {
+  margin-top: 12px;
+  padding: 12px;
+  border-left: 3px solid #146bd1;
+  border-radius: 8px;
+  background: #f1f7ff;
+  line-height: 1.6;
+}
+
+.answer p {
+  margin: 7px 0 0;
+}
+
+.hero .eyebrow {
+  font-size: 0;
+}
+
+.hero .eyebrow::after {
+  content: "AI 中台 / 生产就绪基础";
+  font-size: 10px;
+  letter-spacing: 1.3px;
+}
+
+header .eyebrow {
+  font-size: 0;
+}
+
+header .eyebrow::after {
+  content: "企业 AI 控制面";
+  font-size: 10px;
+  letter-spacing: 1.3px;
+}
+
+.list-item-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.list-item-row .list-item {
+  flex: 1;
+}
+
+.delete-button {
+  width: 34px;
+  padding: 0;
+  color: #c23f55;
+  border-color: #f0c9d1;
+  background: #fff8fa;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.delete-button:hover {
+  color: #fff;
+  border-color: #c23f55;
+  background: #c23f55;
+}
