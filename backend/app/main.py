@@ -233,6 +233,17 @@ async def enforce_monthly_budget(db: AsyncSession, tenant_id: str) -> None:
         raise HTTPException(status_code=429, detail={"code": "monthly_budget_exceeded", "message": "当前租户已超过月度预算，新的 AI 任务已被阻断", "budget": budget, "estimated_cost": round(total, 6)})
 
 
+async def resolve_cost_center(db: AsyncSession, tenant_id: str, project_id: str | None, requested: str | None, fallback: str) -> str:
+    """Resolve explicit attribution first, then use a stable project bucket."""
+    if requested and requested.strip():
+        return requested.strip()[:120]
+    if project_id:
+        project = await db.scalar(select(Project).where(Project.id == project_id, Project.tenant_id == tenant_id))
+        if project and project.slug:
+            return f"project:{project.slug}"[:120]
+    return fallback
+
+
 def validate_extension_manifest(manifest: dict[str, Any]) -> None:
     if not isinstance(manifest, dict):
         raise HTTPException(status_code=422, detail="扩展 manifest 必须是 JSON 对象")
@@ -1560,7 +1571,8 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
     result = await call_chat(db, provider, messages, tenant_id=ctx.tenant_id)
     usage = result.get("usage") or {}
     total_tokens = int(usage.get("total_tokens", 0))
-    db.add(ComputeUsage(tenant_id=ctx.tenant_id, cost_center=body.cost_center or "agent", tokens=total_tokens))
+    cost_center = await resolve_cost_center(db, ctx.tenant_id, agent.project_id, body.cost_center, "agent")
+    db.add(ComputeUsage(tenant_id=ctx.tenant_id, cost_center=cost_center, tokens=total_tokens))
     event = AgentEvent(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, event_type="message", tokens=total_tokens, latency_ms=int((time.perf_counter() - started) * 1000), detail_json={"provider_id": provider.id, "model": provider.default_model})
     db.add(event)
     await audit(db, ctx, "agent.chat", "agent", agent.id, {"provider": provider.name, "usage": result.get("usage", {})})
@@ -1916,7 +1928,8 @@ async def run_workflow(workflow_id: str, body: WorkflowRunRequest, ctx: Operator
         running = await db.scalar(select(func.count()).select_from(WorkflowRun).where(WorkflowRun.tenant_id == ctx.tenant_id, WorkflowRun.status.in_(["queued", "running"]))) or 0
         if int(running) >= quota.concurrent_runs:
             raise HTTPException(status_code=429, detail="已达到租户并发运行配额")
-    run = WorkflowRun(tenant_id=ctx.tenant_id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=version_number, cost_center=body.cost_center or "unassigned", input_json=body.input, trace_id="", created_by=ctx.user_id)
+    cost_center = await resolve_cost_center(db, ctx.tenant_id, workflow.project_id, body.cost_center, "workflow")
+    run = WorkflowRun(tenant_id=ctx.tenant_id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=version_number, cost_center=cost_center, input_json=body.input, trace_id="", created_by=ctx.user_id)
     db.add(run)
     await audit(db, ctx, "workflow.run.create", "workflow_run", run.id, {"workflow_id": workflow.id, "version": version_number})
     await db.commit()
@@ -1959,7 +1972,9 @@ async def trigger_workflow_webhook(workflow_id: str, body: WorkflowWebhookReques
     version_number = body.version or await select_release_version(db, workflow, "production", f"webhook:{workflow.id}") or workflow.published_version
     if not version_number:
         raise HTTPException(status_code=422, detail="工作流尚未发布")
-    run = WorkflowRun(tenant_id=workflow.tenant_id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=version_number, input_json=body.input, trace_id="", created_by=workflow.created_by)
+    project = await db.scalar(select(Project).where(Project.id == workflow.project_id, Project.tenant_id == workflow.tenant_id))
+    cost_center = f"project:{project.slug}"[:120] if project and project.slug else "workflow"
+    run = WorkflowRun(tenant_id=workflow.tenant_id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=version_number, cost_center=cost_center, input_json=body.input, trace_id="", created_by=workflow.created_by)
     db.add(run)
     await db.commit()
     await enqueue_run(run.id)
@@ -2013,7 +2028,7 @@ async def delete_workflow_schedule(schedule_id: str, ctx: EditorContext, db: Asy
 @app.get("/api/runs")
 async def list_runs(ctx: Context, db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(WorkflowRun).where(WorkflowRun.tenant_id == ctx.tenant_id).order_by(desc(WorkflowRun.created_at)).limit(100))).scalars().all()
-    return [{"id": row.id, "workflow_id": row.workflow_id, "status": row.status, "version": row.workflow_version, "trace_id": row.trace_id, "error": row.error, "created_at": row.created_at, "finished_at": row.finished_at} for row in rows]
+    return [{"id": row.id, "workflow_id": row.workflow_id, "status": row.status, "version": row.workflow_version, "cost_center": row.cost_center, "trace_id": row.trace_id, "error": row.error, "created_at": row.created_at, "finished_at": row.finished_at} for row in rows]
 
 
 @app.get("/api/runs/{run_id}")
@@ -2021,7 +2036,21 @@ async def get_run(run_id: str, ctx: Context, db: AsyncSession = Depends(get_db))
     row = await db.scalar(select(WorkflowRun).where(WorkflowRun.id == run_id, WorkflowRun.tenant_id == ctx.tenant_id))
     if not row:
         raise HTTPException(status_code=404, detail="运行记录不存在")
-    return {"id": row.id, "workflow_id": row.workflow_id, "status": row.status, "version": row.workflow_version, "input": row.input_json, "state": row.state_json, "output": row.output_json, "error": row.error, "trace_id": row.trace_id, "created_at": row.created_at, "started_at": row.started_at, "finished_at": row.finished_at}
+    return {"id": row.id, "workflow_id": row.workflow_id, "status": row.status, "version": row.workflow_version, "cost_center": row.cost_center, "input": row.input_json, "state": row.state_json, "output": row.output_json, "error": row.error, "trace_id": row.trace_id, "created_at": row.created_at, "started_at": row.started_at, "finished_at": row.finished_at}
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_workflow_run(run_id: str, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
+    row = await db.scalar(select(WorkflowRun).where(WorkflowRun.id == run_id, WorkflowRun.tenant_id == ctx.tenant_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="运行记录不存在")
+    if row.status in {"queued", "running", "waiting_approval"}:
+        row.status = "cancelled"
+        row.error = "已由用户取消"
+        row.finished_at = utcnow()
+        await audit(db, ctx, "workflow.run.cancel", "workflow_run", row.id)
+        await db.commit()
+    return {"run_id": row.id, "status": row.status}
 
 
 @app.post("/api/runs/{run_id}/approval")
@@ -2970,6 +2999,25 @@ async def list_publish_bindings(ctx: Context, db: AsyncSession = Depends(get_db)
     return [{"id": binding.id, "resource_type": binding.resource_type, "resource_id": binding.resource_id, "channel_id": binding.channel_id, "channel": channel.name, "version": binding.version, "status": binding.status, "config": binding.config_json, "published_at": binding.published_at, "created_at": binding.created_at} for binding, channel in rows]
 
 
+@app.get("/api/publish/resources")
+async def list_publish_resources(ctx: Context, db: AsyncSession = Depends(get_db)):
+    """Return publishable resources and their current safe-to-bind version."""
+    agents = (await db.execute(select(Agent).where(Agent.tenant_id == ctx.tenant_id).order_by(Agent.name))).scalars().all()
+    workflows = (await db.execute(select(Workflow).where(Workflow.tenant_id == ctx.tenant_id).order_by(Workflow.name))).scalars().all()
+    applications = (await db.execute(select(Application).where(Application.tenant_id == ctx.tenant_id).order_by(Application.name))).scalars().all()
+    configs = (await db.execute(select(AgentConfig).where(AgentConfig.tenant_id == ctx.tenant_id))).scalars().all()
+    config_by_agent = {item.agent_id: item for item in configs}
+    result = []
+    for row in agents:
+        config = config_by_agent.get(row.id)
+        result.append({"id": row.id, "resource_type": "agent", "name": row.name, "status": config.publish_status if config else "draft", "version": (config.published_version if config and config.published_version else row.version) or 1})
+    result.extend({"id": row.id, "resource_type": "workflow", "name": row.name, "status": row.status, "version": row.published_version or row.latest_version or 1} for row in workflows)
+    for row in applications:
+        version = await db.scalar(select(func.max(ApplicationVersion.version)).where(ApplicationVersion.application_id == row.id, ApplicationVersion.tenant_id == ctx.tenant_id)) or 1
+        result.append({"id": row.id, "resource_type": "application", "name": row.name, "status": row.status, "version": version})
+    return result
+
+
 @app.post("/api/publish/bindings")
 async def create_publish_binding(body: PublishBindingCreate, ctx: EditorContext, db: AsyncSession = Depends(get_db)):
     channel = await db.scalar(select(PublishChannel).where(PublishChannel.id == body.channel_id, PublishChannel.tenant_id == ctx.tenant_id, PublishChannel.enabled.is_(True)))
@@ -2979,6 +3027,15 @@ async def create_publish_binding(body: PublishBindingCreate, ctx: EditorContext,
     resource = await db.scalar(select(resource_models[body.resource_type]).where(resource_models[body.resource_type].id == body.resource_id, resource_models[body.resource_type].tenant_id == ctx.tenant_id))
     if not resource:
         raise HTTPException(status_code=404, detail="待发布资源不存在或不属于当前租户")
+    if body.resource_type == "agent":
+        config = await db.scalar(select(AgentConfig).where(AgentConfig.agent_id == body.resource_id, AgentConfig.tenant_id == ctx.tenant_id))
+        current_version = (config.published_version if config and config.published_version else resource.version) or 1
+    elif body.resource_type == "workflow":
+        current_version = resource.published_version or resource.latest_version or 1
+    else:
+        current_version = await db.scalar(select(func.max(ApplicationVersion.version)).where(ApplicationVersion.application_id == body.resource_id, ApplicationVersion.tenant_id == ctx.tenant_id)) or 1
+    if body.version > current_version:
+        raise HTTPException(status_code=422, detail=f"资源当前最高版本为 v{current_version}，不能绑定 v{body.version}")
     row = PublishBinding(tenant_id=ctx.tenant_id, resource_type=body.resource_type, resource_id=body.resource_id, channel_id=body.channel_id, version=body.version, config_json=body.config, created_by=ctx.user_id)
     db.add(row)
     try:
@@ -2989,6 +3046,19 @@ async def create_publish_binding(body: PublishBindingCreate, ctx: EditorContext,
     await audit(db, ctx, "publish.binding.create", "publish_binding", row.id, {"channel": channel.code})
     await db.commit()
     return {"id": row.id, "status": row.status, "channel": channel.code}
+
+
+@app.delete("/api/publish/bindings/{binding_id}")
+async def delete_publish_binding(binding_id: str, ctx: EditorContext, db: AsyncSession = Depends(get_db)):
+    row = await db.scalar(select(PublishBinding).where(PublishBinding.id == binding_id, PublishBinding.tenant_id == ctx.tenant_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="发布绑定不存在")
+    if row.status == "published":
+        raise HTTPException(status_code=409, detail="已发布绑定不能直接删除，请先停用或替换")
+    await audit(db, ctx, "publish.binding.delete", "publish_binding", row.id)
+    await db.delete(row)
+    await db.commit()
+    return {"id": binding_id, "deleted": True}
 
 
 @app.post("/api/publish/bindings/{binding_id}/publish")

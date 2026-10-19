@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 
 from ..config import get_settings
 from ..db import AdminSessionLocal
-from ..models import Agent, ComputeUsage, EvaluationJob, GpuLease, ModelProvider, Plugin, SandboxRun, Skill, TenantPolicy, Workflow, WorkflowRun, WorkflowSchedule, WorkflowVersion
+from ..models import Agent, ComputeUsage, EvaluationJob, GpuLease, ModelProvider, Plugin, Project, SandboxRun, Skill, TenantPolicy, Workflow, WorkflowRun, WorkflowSchedule, WorkflowVersion
 from .knowledge import search_chunks
 from .llm import call_chat
 from .observability import new_trace_id, run_failures, runs_total, tool_calls
@@ -24,6 +24,16 @@ QUEUE = "ai_platform:workflow_runs"
 INDEX_QUEUE = "ai_platform:knowledge_index"
 EVALUATION_QUEUE = "ai_platform:evaluation_jobs"
 SANDBOX_QUEUE = "ai_platform:sandbox_runs"
+
+
+class WorkflowCancelled(Exception):
+    pass
+
+
+async def is_run_cancelled(run_id: str) -> bool:
+    async with AdminSessionLocal() as check_db:
+        status = await check_db.scalar(select(WorkflowRun.status).where(WorkflowRun.id == run_id))
+        return status == "cancelled"
 
 
 def now() -> datetime:
@@ -154,6 +164,11 @@ async def execute_run(run_id: str) -> None:
             db.add(ComputeUsage(tenant_id=run.tenant_id, run_id=run.id, cost_center=run.cost_center or "unassigned", cpu_milliseconds=int((time.perf_counter() - started_clock) * 1000), tokens=sum(int((value or {}).get("usage", {}).get("total_tokens", 0)) for value in completed.values() if isinstance(value, dict))))
             await db.commit()
             runs_total.labels(run.tenant_id, "succeeded").inc()
+        except WorkflowCancelled:
+            run.status, run.error, run.finished_at = "cancelled", "已由用户取消", now()
+            db.add(ComputeUsage(tenant_id=run.tenant_id, run_id=run.id, cost_center=run.cost_center or "unassigned", cpu_milliseconds=int((time.perf_counter() - started_clock) * 1000)))
+            await db.commit()
+            runs_total.labels(run.tenant_id, "cancelled").inc()
         except Exception as exc:
             run.status, run.error, run.finished_at = "failed", str(exc), now()
             db.add(ComputeUsage(tenant_id=run.tenant_id, run_id=run.id, cost_center=run.cost_center or "unassigned", cpu_milliseconds=int((time.perf_counter() - started_clock) * 1000)))
@@ -256,7 +271,9 @@ async def dispatch_schedules(redis: Redis) -> None:
             if not workflow or not workflow.published_version:
                 schedule.next_run_at = current + timedelta(seconds=max(10, schedule.interval_seconds))
                 continue
-            run = WorkflowRun(tenant_id=schedule.tenant_id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=workflow.published_version, input_json=schedule.input_json, trace_id="", created_by=schedule.created_by)
+            project = await db.scalar(select(Project).where(Project.id == workflow.project_id, Project.tenant_id == workflow.tenant_id))
+            cost_center = f"project:{project.slug}"[:120] if project and project.slug else "workflow"
+            run = WorkflowRun(tenant_id=schedule.tenant_id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=workflow.published_version, cost_center=cost_center, input_json=schedule.input_json, trace_id="", created_by=schedule.created_by)
             db.add(run)
             await db.flush()
             queued_ids.append(run.id)
@@ -295,6 +312,8 @@ async def execute_graph(db, run: WorkflowRun, version: WorkflowVersion) -> tuple
         pending = [node_id for node_id, count in incoming.items() if count == 0]
     context = {"input": dict(run.input_json or {}), "nodes": completed, "run": {"id": run.id}}
     while pending:
+        if await is_run_cancelled(run.id):
+            raise WorkflowCancelled()
         node_id = pending.pop(0)
         if node_id not in nodes or node_id in completed:
             continue

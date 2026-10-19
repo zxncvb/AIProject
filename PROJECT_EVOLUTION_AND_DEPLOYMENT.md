@@ -775,6 +775,17 @@ Get-Content -Raw -Encoding utf8 deploy/postgres/rls.sql |
 
 本轮继续补齐成本运营和观测：运行与 Agent 调用支持 `cost_center` 归属，`/api/finops/ledger` 提供成本中心汇总/明细，`/api/finops/export` 提供 CSV 导出，`/api/observability/summary` 提供近 30 天成功率、平均延迟和 P95 延迟。历史用量默认归入 `unassigned`。
 
+### 2026-10-20：发布、运行可靠性和自动归属优化
+
+本轮把三个此前“有后端能力但控制台未闭环”的点补齐：
+
+1. **统一发布中心**：控制台可以选择 Agent、工作流或应用，自动读取当前有效版本后创建发布绑定；服务端对资源租户、渠道状态和版本上限进行校验。
+2. **发布绑定生命周期**：草稿绑定可以删除；已发布绑定禁止直接删除并保留审计记录，避免误操作影响线上渠道。
+3. **工作流取消**：新增 `POST /api/runs/{run_id}/cancel`。取消请求会落库，Worker 在每个节点开始前读取最新状态，运行中的任务不会在取消后继续推进后续节点。
+4. **成本中心自动归属**：Agent、Workflow、Webhook 和定时任务在未传入成本中心时，自动归属到 `project:{project_slug}`；显式传入的成本中心仍优先保留。
+
+验证结果：Docker Compose 重新构建成功，后端测试 `10 passed`，前端 Vite 构建成功，`/api/publish/resources` 和 `/api/runs/{run_id}/cancel` 路由已注册，健康检查返回 200。
+
 其中 GPU 设备绑定、Kubernetes Job 实际提交、数据库/Redis/Qdrant 多副本和跨区域复制依赖企业集群。仓库已经提供接入 API、控制器、部署清单和验收入口，但必须在真实基础设施中完成容量、恢复和安全验收，不能把本地 Compose 运行状态视作生产 HA。
 
 升级命令：

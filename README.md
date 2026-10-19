@@ -61,6 +61,13 @@ docker compose up -d --build
 
 ## 优先级能力（当前版本）
 
+### 本轮优化（2026-10-20）
+
+- 发布中心已统一支持 Agent、工作流、应用三类资源，并通过 `/api/publish/resources` 返回可绑定的当前版本；绑定时会拒绝超过资源当前版本的错误版本。
+- 发布绑定支持草稿删除；已发布绑定受到保护，避免误删线上渠道记录。
+- 工作流运行新增 `POST /api/runs/{run_id}/cancel`，队列中、运行中和等待审批的任务都可以取消；Worker 会在节点边界重新检查取消状态。
+- 未显式传入 `cost_center` 时，Agent、Workflow、Webhook 和定时任务自动按 `project:{project_slug}` 归属，减少 `unassigned` 历史数据。
+
 完整架构、代码结构、企业汇报口径和生产验收清单见：[ARCHITECTURE_AND_EXECUTIVE_GUIDE.md](E:/Codex/enterprise_ai_platform/ARCHITECTURE_AND_EXECUTIVE_GUIDE.md)。
 
 - MFA：`/api/me/mfa/setup`、`/api/me/mfa/enable`、`/api/me/mfa/disable`；登录请求支持 `mfa_code`。

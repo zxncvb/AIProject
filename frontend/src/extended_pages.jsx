@@ -122,7 +122,7 @@ export function ExtensionsControl({ data, refresh }) {
   return <div className="page"><Title title="Skills / 插件 / MCP" description="统一登记、审批、测试和启停企业扩展能力。"/><div className="sub-tabs"><button className={tab === "plugin" ? "active" : ""} onClick={() => setTab("plugin")}>插件 <b>{data.plugins.length}</b></button><button className={tab === "skill" ? "active" : ""} onClick={() => setTab("skill")}>Skills <b>{data.skills.length}</b></button><button className={tab === "mcp" ? "active" : ""} onClick={() => setTab("mcp")}>MCP <b>{data.mcp.length}</b></button></div>{tab === "plugin" && <Box title="插件工具" subtitle="插件必须审批通过后才能测试和被 Agent 调用"><div className="table"><div className="table-head"><span>插件</span><span>地址</span><span>审批</span><span>操作</span></div>{data.plugins.map((item) => <div className="table-row" key={item.id}><b>{item.name}</b><span>{item.endpoint}</span><Tag>{item.approval_status}</Tag><div className="button-row">{item.approval_status === "pending" && <button onClick={() => action(`/api/plugins/${item.id}/approve`)}>通过</button>}{item.approval_status === "approved" && <button onClick={() => action(`/api/plugins/${item.id}/test`)}>Debug</button>}<button onClick={() => action(`/api/plugins/${item.id}`, "patch", { enabled: !item.enabled })}>{item.enabled ? "停用" : "启用"}</button></div></div>)}</div>{!data.plugins.length && <div className="empty">暂无插件。</div>}</Box>}{tab === "skill" && <div className="two-col"><Box title="Skill 目录" subtitle="说明书型能力，可被 Agent 按需加载"><div className="table">{data.skills.map((item) => <div className="table-row" key={item.id}><b>{item.name}</b><span>v{item.version}</span><Tag>{item.enabled ? "启用" : "停用"}</Tag><div className="button-row"><button onClick={() => runSkill(item)}>执行</button><button onClick={() => action(`/api/skills/${item.id}`, "patch", { enabled: !item.enabled })}>{item.enabled ? "停用" : "启用"}</button></div></div>)}</div></Box><Box title="Skill 调试输入 JSON"><textarea className="large-textarea" value={skillInput} onChange={(e) => setSkillInput(e.target.value)}/><Note>执行时会优先使用 Skill manifest 指定的模型；未配置模型时返回原始指令。</Note></Box></div>}{tab === "mcp" && <Box title="MCP 服务" subtitle="支持 Streamable HTTP、SSE 和 stdio 登记"><div className="table"><div className="table-head"><span>服务</span><span>传输</span><span>地址</span><span>操作</span></div>{data.mcp.map((item) => <div className="table-row" key={item.id}><b>{item.name}</b><span>{item.transport}</span><span>{item.endpoint}</span><Tag>{item.enabled ? "启用" : "停用"}</Tag><div className="button-row"><button onClick={() => action(`/api/mcp-servers/${item.id}/test`)}>测试</button><button onClick={() => action(`/api/mcp-servers/${item.id}`, "patch", { enabled: !item.enabled })}>{item.enabled ? "停用" : "启用"}</button></div></div>)}</div>{!data.mcp.length && <div className="empty">暂无 MCP 服务。</div>}</Box>}{message && <Note>{message}</Note>}</div>;
 }
 
-export function PublishingCenter({ data }) {
+export function PublishingCenterLegacy({ data }) {
   const [channels, setChannels] = useState([]); const [bindings, setBindings] = useState([]); const [resource, setResource] = useState(data.agents[0]?.id || ""); const [channel, setChannel] = useState(""); const [message, setMessage] = useState("");
   async function load() { try { const [c, b] = await Promise.all([api.get("/api/publish/channels"), api.get("/api/publish/bindings")]); setChannels(c.data); setBindings(b.data); if (!channel && c.data[0]) setChannel(c.data[0].id); } catch (err) { setMessage(errorText(err, "发布配置读取失败")); } } useEffect(() => { load(); }, []);
   async function bind() { try { await api.post("/api/publish/bindings", { resource_type: "agent", resource_id: resource, channel_id: channel, version: 1, config: { visibility: "private" } }); setMessage("发布渠道已绑定，点击“渠道发布”后生效"); await load(); } catch (err) { setMessage(errorText(err, "渠道绑定失败")); } }
@@ -130,6 +130,116 @@ export function PublishingCenter({ data }) {
   async function requestApproval(item) { try { await api.post("/api/approvals", { type: "channel.publish", resource_type: "publish_binding", resource_id: item.id, title: `申请发布到 ${item.channel}` }); setMessage("审批申请已提交"); } catch (err) { setMessage(errorText(err, "审批申请失败")); } }
   return <div className="page"><Title title="发布管理" description="把 Agent 版本发布到 API、MCP、Web、WebSDK、飞书、企业微信和 A2A 渠道。" actions={<button className="primary" onClick={bind} disabled={!resource || !channel}>+ 添加渠道绑定</button>}/><div className="two-col"><Box title="渠道目录" subtitle={`${channels.length} 个渠道`}><div className="table">{channels.map((item) => <div className="table-row" key={item.id}><b>{item.name}</b><span>{item.code}</span><span>{item.approval_required ? "需要审批" : "直接发布"}</span><Tag>{item.enabled ? "启用" : "停用"}</Tag></div>)}</div></Box><Box title="新增绑定"><label className="form-label">Agent<select value={resource} onChange={(e) => setResource(e.target.value)}>{data.agents.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label className="form-label">渠道<select value={channel} onChange={(e) => setChannel(e.target.value)}>{channels.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><Note>绑定配置会先保存为草稿；生产渠道需再次发布，受审批的渠道还需审批通过。</Note></Box></div><Box title="发布绑定" subtitle={`${bindings.length} 条`}><div className="table"><div className="table-head"><span>资源</span><span>渠道</span><span>版本</span><span>状态</span></div>{bindings.map((item) => <div className="table-row" key={item.id}><b>{item.resource_id.slice(0, 12)}</b><span>{item.channel}</span><span>v{item.version}</span><div className="button-row"><Tag>{item.status}</Tag>{item.status !== "published" && <button onClick={() => publish(item)}>渠道发布</button>}{item.status !== "published" && <button onClick={() => requestApproval(item)}>提交审批</button>}</div></div>)}</div>{!bindings.length && <div className="empty">暂无发布绑定。</div>}</Box><Note>{message}</Note></div>;
 }
+
+export function PublishingCenter({ data }) {
+  const [channels, setChannels] = useState([]);
+  const [bindings, setBindings] = useState([]);
+  const [resources, setResources] = useState([]);
+  const [resourceType, setResourceType] = useState("agent");
+  const [resourceId, setResourceId] = useState("");
+  const [channelId, setChannelId] = useState("");
+  const [message, setMessage] = useState("");
+
+  const availableResources = resources.filter((item) => item.resource_type === resourceType);
+  const selectedResource = availableResources.find((item) => item.id === resourceId) || availableResources[0];
+
+  async function load() {
+    try {
+      const [channelResponse, bindingResponse, resourceResponse] = await Promise.all([
+        api.get("/api/publish/channels"),
+        api.get("/api/publish/bindings"),
+        api.get("/api/publish/resources"),
+      ]);
+      setChannels(channelResponse.data);
+      setBindings(bindingResponse.data);
+      setResources(resourceResponse.data);
+      if (!channelId && channelResponse.data[0]) setChannelId(channelResponse.data[0].id);
+      if (!resourceId && resourceResponse.data.find((item) => item.resource_type === resourceType)) {
+        setResourceId(resourceResponse.data.find((item) => item.resource_type === resourceType).id);
+      }
+    } catch (err) {
+      setMessage(errorText(err, "发布中心数据加载失败"));
+    }
+  }
+
+  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const first = resources.find((item) => item.resource_type === resourceType);
+    setResourceId(first?.id || "");
+  }, [resourceType, resources]);
+
+  async function bind() {
+    if (!selectedResource || !channelId) return;
+    try {
+      await api.post("/api/publish/bindings", {
+        resource_type: resourceType,
+        resource_id: selectedResource.id,
+        channel_id: channelId,
+        version: selectedResource.version,
+        config: { visibility: "private" },
+      });
+      setMessage(`${selectedResource.name} v${selectedResource.version} 已创建发布绑定`);
+      await load();
+    } catch (err) {
+      setMessage(errorText(err, "发布绑定创建失败"));
+    }
+  }
+
+  async function publish(item) {
+    try {
+      await api.post(`/api/publish/bindings/${item.id}/publish`);
+      setMessage("发布已生效");
+      await load();
+    } catch (err) {
+      setMessage(errorText(err, "渠道发布失败"));
+    }
+  }
+
+  async function remove(item) {
+    if (!window.confirm("确认删除这个草稿发布绑定吗？")) return;
+    try {
+      await api.delete(`/api/publish/bindings/${item.id}`);
+      setMessage("草稿绑定已删除");
+      await load();
+    } catch (err) {
+      setMessage(errorText(err, "绑定删除失败"));
+    }
+  }
+
+  async function requestApproval(item) {
+    try {
+      await api.post("/api/approvals", { type: "channel.publish", resource_type: "publish_binding", resource_id: item.id, title: `申请发布到 ${item.channel}` });
+      setMessage("审批申请已提交");
+    } catch (err) {
+      setMessage(errorText(err, "审批申请提交失败"));
+    }
+  }
+
+  const resourceName = (item) => resources.find((resource) => resource.id === item.resource_id && resource.resource_type === item.resource_type)?.name || item.resource_id.slice(0, 12);
+  const typeName = { agent: "Agent", workflow: "工作流", application: "应用" };
+
+  return <div className="page">
+    <Title title="发布管理" description="统一管理 Agent、工作流和应用的版本发布、渠道绑定与审批。" actions={<button className="primary" onClick={bind} disabled={!selectedResource || !channelId}>新增发布绑定</button>} />
+    <div className="two-col">
+      <Box title="发布资源" subtitle="只允许绑定当前资源的有效版本">
+        <div className="sub-tabs">
+          {[["agent", "Agent"], ["workflow", "工作流"], ["application", "应用"]].map(([type, label]) => <button key={type} className={resourceType === type ? "active" : ""} onClick={() => setResourceType(type)}>{label}</button>)}
+        </div>
+        <label className="form-label">资源<select value={selectedResource?.id || ""} onChange={(event) => setResourceId(event.target.value)}><option value="">选择资源</option>{availableResources.map((item) => <option key={item.id} value={item.id}>{item.name} · v{item.version}</option>)}</select></label>
+        {selectedResource && <div className="notice">当前版本：v{selectedResource.version} · 状态：{selectedResource.status}</div>}
+      </Box>
+      <Box title="渠道目录" subtitle={`${channels.length} 个渠道`}>
+        <div className="table">{channels.map((item) => <div className="table-row" key={item.id}><b>{item.name}</b><span>{item.code}</span><span>{item.approval_required ? "需要审批" : "直接发布"}</span><Tag>{item.enabled ? "启用" : "停用"}</Tag></div>)}</div>
+      </Box>
+    </div>
+    <Box title="发布绑定" subtitle={`${bindings.length} 条`}>
+      <div className="table"><div className="table-head"><span>资源</span><span>类型</span><span>渠道</span><span>版本</span><span>状态</span><span>操作</span></div>{bindings.map((item) => <div className="table-row" key={item.id}><b>{resourceName(item)}</b><span>{typeName[item.resource_type] || item.resource_type}</span><span>{item.channel}</span><span>v{item.version}</span><Tag>{item.status === "published" ? "已发布" : "草稿"}</Tag><div className="button-row">{item.status !== "published" && <button onClick={() => publish(item)}>发布</button>}{item.status !== "published" && <button onClick={() => requestApproval(item)}>提交审批</button>}{item.status !== "published" && <button onClick={() => remove(item)}>删除</button>}</div></div>)}</div>
+      {!bindings.length && <div className="empty">暂无发布绑定。</div>}
+    </Box>
+    <Note>{message}</Note>
+  </div>;
+}
+
 
 export function ApprovalCenter() {
   const [items, setItems] = useState([]); const [message, setMessage] = useState(""); const [form, setForm] = useState({ title: "申请发布企业 Agent", type: "resource.publish", resource_type: "agent", resource_id: "" });
