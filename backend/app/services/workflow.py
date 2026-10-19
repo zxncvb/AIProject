@@ -151,12 +151,12 @@ async def execute_run(run_id: str) -> None:
             run.output_json = completed.get(last_node_id, completed) if last_node_id else completed
             run.status, run.finished_at = "succeeded", now()
             run.state_json = state
-            db.add(ComputeUsage(tenant_id=run.tenant_id, run_id=run.id, cpu_milliseconds=int((time.perf_counter() - started_clock) * 1000), tokens=sum(int((value or {}).get("usage", {}).get("total_tokens", 0)) for value in completed.values() if isinstance(value, dict))))
+            db.add(ComputeUsage(tenant_id=run.tenant_id, run_id=run.id, cost_center=run.cost_center or "unassigned", cpu_milliseconds=int((time.perf_counter() - started_clock) * 1000), tokens=sum(int((value or {}).get("usage", {}).get("total_tokens", 0)) for value in completed.values() if isinstance(value, dict))))
             await db.commit()
             runs_total.labels(run.tenant_id, "succeeded").inc()
         except Exception as exc:
             run.status, run.error, run.finished_at = "failed", str(exc), now()
-            db.add(ComputeUsage(tenant_id=run.tenant_id, run_id=run.id, cpu_milliseconds=int((time.perf_counter() - started_clock) * 1000)))
+            db.add(ComputeUsage(tenant_id=run.tenant_id, run_id=run.id, cost_center=run.cost_center or "unassigned", cpu_milliseconds=int((time.perf_counter() - started_clock) * 1000)))
             await db.commit()
             run_failures.labels(run.tenant_id).inc()
             runs_total.labels(run.tenant_id, "failed").inc()

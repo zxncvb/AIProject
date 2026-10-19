@@ -45,7 +45,7 @@ docker compose up -d --build
 - 应用：`POST /public/apps/{tenant_slug}/{app_slug}/invoke` 可调用绑定的已发布工作流；全代码应用需要配置受控沙箱镜像。
 - 安全：`/api/safety/check`、租户安全策略、PII 脱敏、提示词注入检测。
 - 评测：`POST /api/evaluations/run` 使用测试集调用智能体并返回通过率。
-- FinOps：`/api/finops/summary` 提供 Token、CPU、GPU 用量和租户估算成本。
+- FinOps：`/api/finops/summary` 提供 Token、CPU、GPU 用量和租户估算成本；`/api/finops/ledger` 按成本中心返回用量与费用，`/api/finops/export` 导出 CSV。
 - 扩展治理：插件/MCP manifest 的 capabilities 白名单校验。
 - 运维：多区域 Kustomize overlay、灾备恢复演练脚本、镜像漏洞/签名扫描脚本、Alertmanager 生产模板。
 

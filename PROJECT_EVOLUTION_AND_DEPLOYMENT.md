@@ -773,6 +773,8 @@ Get-Content -Raw -Encoding utf8 deploy/postgres/rls.sql |
 
 本轮重新实现了此前未闭环的优先级能力：MFA/SCIM 身份生命周期、GPU 租约调度、全代码沙箱 Job 控制器、异步 AI 评测、插件审批隔离、Webhook 告警适配、FinOps 月度预算、密钥轮换，以及 Kubernetes 沙箱 RBAC/NetworkPolicy 和状态组件 HA 参考资源。
 
+本轮继续补齐成本运营和观测：运行与 Agent 调用支持 `cost_center` 归属，`/api/finops/ledger` 提供成本中心汇总/明细，`/api/finops/export` 提供 CSV 导出，`/api/observability/summary` 提供近 30 天成功率、平均延迟和 P95 延迟。历史用量默认归入 `unassigned`。
+
 其中 GPU 设备绑定、Kubernetes Job 实际提交、数据库/Redis/Qdrant 多副本和跨区域复制依赖企业集群。仓库已经提供接入 API、控制器、部署清单和验收入口，但必须在真实基础设施中完成容量、恢复和安全验收，不能把本地 Compose 运行状态视作生产 HA。
 
 升级命令：
@@ -791,4 +793,4 @@ docker compose exec -T backend alembic upgrade head
 
 新增后端资源包括组织与工作区、Agent 配置/版本/事件/API Key、提示词模板、数据库连接与 schema 快照、知识扩展资源、市场资源、收藏、发布渠道与绑定、审批申请、干预规则等。Agent 已覆盖导入、导出、复制、删除、资源编排、触发器和反馈统计；数据库问答已支持 PostgreSQL、MySQL、SQL Server、Oracle 的只读实时查询与表结构同步，其中 SQL Server 需要在企业镜像中安装 Microsoft ODBC Driver。
 
-验收结果：前端 Vite 构建通过；后端 pytest `5 passed`；登录、工作区、模型目录、提示词、数据库、市场、发布绑定、审批、安全、FinOps 等接口均返回 HTTP 200；Docker Compose 中前后端、Worker、PostgreSQL、Redis、Qdrant、Prometheus、Grafana 等服务正常运行。
+验收结果：前端 Vite 构建通过；后端 pytest `10 passed`；数据库迁移已升级至 `20261019_finops_observability`；登录、工作区、模型目录、提示词、数据库、市场、发布绑定、审批、安全、FinOps、观测等接口均返回预期结果；Docker Compose 中前后端、Worker、PostgreSQL、Redis、Qdrant、Prometheus、Grafana 等服务正常运行。

@@ -1292,6 +1292,56 @@ async def update_finops_budget(body: BudgetUpdate, ctx: AdminContext, db: AsyncS
     return {"monthly_budget": body.monthly_budget, "currency": pricing.get("currency", get_settings().finops_currency)}
 
 
+def finops_costs(usage: ComputeUsage, pricing: dict[str, Any]) -> dict[str, float]:
+    token = int(usage.tokens or 0) / 1000 * float(pricing.get("token_price_per_1k", get_settings().finops_token_price_per_1k))
+    gpu = int(usage.gpu_seconds or 0) * float(pricing.get("gpu_price_per_second", get_settings().finops_gpu_price_per_second))
+    cpu = int(usage.cpu_milliseconds or 0) / 1000 * float(pricing.get("cpu_price_per_second", get_settings().finops_cpu_price_per_second))
+    return {"tokens": round(token, 6), "gpu": round(gpu, 6), "cpu": round(cpu, 6), "total": round(token + gpu + cpu, 6)}
+
+
+async def load_finops_rows(db: AsyncSession, tenant_id: str, since: datetime | None, until: datetime | None, cost_center: str | None):
+    conditions = [ComputeUsage.tenant_id == tenant_id]
+    if since:
+        conditions.append(ComputeUsage.created_at >= since)
+    if until:
+        conditions.append(ComputeUsage.created_at <= until)
+    if cost_center:
+        conditions.append(ComputeUsage.cost_center == cost_center)
+    return (await db.execute(select(ComputeUsage).where(*conditions).order_by(desc(ComputeUsage.created_at)).limit(5000))).scalars().all()
+
+
+@app.get("/api/finops/ledger")
+async def finops_ledger(ctx: AdminContext, db: AsyncSession = Depends(get_db), since: datetime | None = None, until: datetime | None = None, cost_center: str | None = None):
+    policy = await tenant_policy(db, ctx.tenant_id)
+    pricing = policy.pricing_json or {}
+    rows = await load_finops_rows(db, ctx.tenant_id, since, until, cost_center)
+    by_center: dict[str, dict[str, Any]] = {}
+    items = []
+    for usage in rows:
+        costs = finops_costs(usage, pricing)
+        center = usage.cost_center or "unassigned"
+        bucket = by_center.setdefault(center, {"cost_center": center, "records": 0, "tokens": 0, "cpu_milliseconds": 0, "gpu_seconds": 0, "cost": 0.0})
+        bucket["records"] += 1
+        bucket["tokens"] += int(usage.tokens or 0)
+        bucket["cpu_milliseconds"] += int(usage.cpu_milliseconds or 0)
+        bucket["gpu_seconds"] += int(usage.gpu_seconds or 0)
+        bucket["cost"] = round(bucket["cost"] + costs["total"], 6)
+        items.append({"id": usage.id, "run_id": usage.run_id, "cost_center": center, "created_at": usage.created_at, "tokens": int(usage.tokens or 0), "cpu_milliseconds": int(usage.cpu_milliseconds or 0), "gpu_seconds": int(usage.gpu_seconds or 0), "cost": costs})
+    return {"currency": pricing.get("currency", get_settings().finops_currency), "records": items, "by_cost_center": list(by_center.values())}
+
+
+@app.get("/api/finops/export", response_class=PlainTextResponse)
+async def export_finops(ctx: AdminContext, db: AsyncSession = Depends(get_db), since: datetime | None = None, until: datetime | None = None, cost_center: str | None = None):
+    policy = await tenant_policy(db, ctx.tenant_id)
+    pricing = policy.pricing_json or {}
+    rows = await load_finops_rows(db, ctx.tenant_id, since, until, cost_center)
+    lines = ["id,run_id,cost_center,created_at,tokens,cpu_milliseconds,gpu_seconds,cost"]
+    for usage in rows:
+        values = [usage.id, usage.run_id or "", usage.cost_center or "unassigned", usage.created_at.isoformat(), usage.tokens, usage.cpu_milliseconds, usage.gpu_seconds, finops_costs(usage, pricing)["total"]]
+        lines.append(",".join('"' + str(value).replace('"', '""') + '"' for value in values))
+    return PlainTextResponse("\n".join(lines), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=finops-ledger.csv"})
+
+
 @app.get("/api/models")
 async def list_models(ctx: Context, db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(ModelProvider).where(ModelProvider.tenant_id == ctx.tenant_id).order_by(ModelProvider.name))).scalars().all()
@@ -1510,7 +1560,7 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
     result = await call_chat(db, provider, messages, tenant_id=ctx.tenant_id)
     usage = result.get("usage") or {}
     total_tokens = int(usage.get("total_tokens", 0))
-    db.add(ComputeUsage(tenant_id=ctx.tenant_id, tokens=total_tokens))
+    db.add(ComputeUsage(tenant_id=ctx.tenant_id, cost_center=body.cost_center or "agent", tokens=total_tokens))
     event = AgentEvent(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, event_type="message", tokens=total_tokens, latency_ms=int((time.perf_counter() - started) * 1000), detail_json={"provider_id": provider.id, "model": provider.default_model})
     db.add(event)
     await audit(db, ctx, "agent.chat", "agent", agent.id, {"provider": provider.name, "usage": result.get("usage", {})})
@@ -1571,7 +1621,7 @@ async def run_evaluation(body: EvaluationRequest, ctx: AdminContext, db: AsyncSe
         total_tokens += int(usage.get("total_tokens", 0))
         missing = [expected for expected in case.expected_contains if expected.lower() not in answer.lower()]
         results.append({"message": case.message, "answer": answer, "passed": not missing, "score": 1 if not missing else 0, "missing": missing, "usage": usage})
-    db.add(ComputeUsage(tenant_id=ctx.tenant_id, tokens=total_tokens))
+    db.add(ComputeUsage(tenant_id=ctx.tenant_id, cost_center="evaluation", tokens=total_tokens))
     passed = sum(1 for item in results if item["passed"])
     await audit(db, ctx, "evaluation.run", "agent", agent.id, {"cases": len(results), "passed": passed, "tokens": total_tokens})
     await db.commit()
@@ -1866,7 +1916,7 @@ async def run_workflow(workflow_id: str, body: WorkflowRunRequest, ctx: Operator
         running = await db.scalar(select(func.count()).select_from(WorkflowRun).where(WorkflowRun.tenant_id == ctx.tenant_id, WorkflowRun.status.in_(["queued", "running"]))) or 0
         if int(running) >= quota.concurrent_runs:
             raise HTTPException(status_code=429, detail="已达到租户并发运行配额")
-    run = WorkflowRun(tenant_id=ctx.tenant_id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=version_number, input_json=body.input, trace_id="", created_by=ctx.user_id)
+    run = WorkflowRun(tenant_id=ctx.tenant_id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=version_number, cost_center=body.cost_center or "unassigned", input_json=body.input, trace_id="", created_by=ctx.user_id)
     db.add(run)
     await audit(db, ctx, "workflow.run.create", "workflow_run", run.id, {"workflow_id": workflow.id, "version": version_number})
     await db.commit()
@@ -2410,7 +2460,13 @@ async def observability_summary(ctx: AdminContext, db: AsyncSession = Depends(ge
     failed_runs = await db.scalar(select(func.count()).select_from(WorkflowRun).where(WorkflowRun.tenant_id == ctx.tenant_id, WorkflowRun.status == "failed")) or 0
     total_runs = await db.scalar(select(func.count()).select_from(WorkflowRun).where(WorkflowRun.tenant_id == ctx.tenant_id)) or 0
     usage = (await db.execute(select(func.coalesce(func.sum(ComputeUsage.cpu_milliseconds), 0), func.coalesce(func.sum(ComputeUsage.gpu_seconds), 0), func.coalesce(func.sum(ComputeUsage.tokens), 0)).where(ComputeUsage.tenant_id == ctx.tenant_id))).one()
-    return {"active_runs": int(active_runs), "failed_runs": int(failed_runs), "total_runs": int(total_runs), "failure_rate": round(float(failed_runs) / total_runs, 4) if total_runs else 0, "usage": {"cpu_milliseconds": int(usage[0]), "gpu_seconds": int(usage[1]), "tokens": int(usage[2])}, "security": secret_backend_status()}
+    recent_since = utcnow() - timedelta(days=30)
+    recent_runs = (await db.execute(select(WorkflowRun).where(WorkflowRun.tenant_id == ctx.tenant_id, WorkflowRun.created_at >= recent_since).order_by(WorkflowRun.created_at))).scalars().all()
+    recent_finished = [item for item in recent_runs if item.finished_at and item.started_at]
+    recent_succeeded = sum(1 for item in recent_runs if item.status == "succeeded")
+    latencies = sorted(max(0, int((item.finished_at - item.started_at).total_seconds() * 1000)) for item in recent_finished)
+    p95_index = min(len(latencies) - 1, max(0, int(len(latencies) * 0.95) - 1)) if latencies else 0
+    return {"active_runs": int(active_runs), "failed_runs": int(failed_runs), "total_runs": int(total_runs), "failure_rate": round(float(failed_runs) / total_runs, 4) if total_runs else 0, "recent_window_days": 30, "recent_runs": len(recent_runs), "success_rate_30d": round(recent_succeeded / len(recent_runs), 4) if recent_runs else 0, "avg_latency_ms_30d": round(sum(latencies) / len(latencies), 2) if latencies else 0, "p95_latency_ms_30d": latencies[p95_index] if latencies else 0, "usage": {"cpu_milliseconds": int(usage[0]), "gpu_seconds": int(usage[1]), "tokens": int(usage[2])}, "security": secret_backend_status()}
 
 
 # Product surface APIs. These resources back the workspace, Agent editor, model

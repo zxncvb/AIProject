@@ -104,6 +104,7 @@ class AgentCreate(BaseModel):
 class AgentChatRequest(BaseModel):
     message: str = Field(min_length=1)
     conversation: list[dict[str, str]] = Field(default_factory=list)
+    cost_center: str | None = Field(default=None, max_length=120)
 
 
 class WorkflowCreate(BaseModel):
@@ -126,6 +127,7 @@ class WorkflowRunRequest(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
     version: int | None = None
     environment: str = Field(default="production", pattern=r"^(dev|staging|production)$")
+    cost_center: str | None = Field(default=None, max_length=120)
 
 
 class WorkflowWebhookRequest(BaseModel):

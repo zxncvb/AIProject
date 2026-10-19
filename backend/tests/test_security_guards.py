@@ -1,7 +1,7 @@
 import pytest
 from fastapi import HTTPException
 
-from app.main import bind_database_parameters, validate_extension_manifest, validate_knowledge_asset
+from app.main import bind_database_parameters, finops_costs, validate_extension_manifest, validate_knowledge_asset
 
 
 def test_extension_manifest_rejects_capability_outside_allowlist():
@@ -27,3 +27,13 @@ def test_database_parameters_are_bound_for_each_driver_style():
     sql, params = bind_database_parameters("SELECT * FROM orders WHERE id = :order_id", "oracle", {"order_id": 7})
     assert sql.endswith("id = :order_id")
     assert params == {"order_id": 7}
+
+
+def test_finops_costs_are_calculated_from_usage_and_pricing():
+    class Usage:
+        tokens = 2000
+        cpu_milliseconds = 3000
+        gpu_seconds = 4
+
+    costs = finops_costs(Usage(), {"token_price_per_1k": 0.1, "cpu_price_per_second": 0.2, "gpu_price_per_second": 0.5})
+    assert costs == {"tokens": 0.2, "gpu": 2.0, "cpu": 0.6, "total": 2.8}
