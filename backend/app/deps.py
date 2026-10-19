@@ -8,7 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .db import get_db, set_tenant_context
+from .db import AdminSessionLocal, get_db, set_tenant_context
 from .models import ApiKey, Membership, Role, Tenant, User
 from .security import decode_access_token
 
@@ -74,6 +74,15 @@ async def get_context(
         row = result.first()
     except Exception:
         key_hash = hashlib.sha256(token.encode()).hexdigest()
+        # API keys do not expose a tenant identifier. Resolve only the hashed key
+        # through the privileged connection, then perform the actual authorization
+        # through the tenant-scoped runtime connection so RLS remains effective.
+        async with AdminSessionLocal() as admin_db:
+            key_identity = await admin_db.scalar(select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.enabled.is_(True)))
+        if not key_identity:
+            raise HTTPException(status_code=401, detail="登录令牌无效或已过期")
+        tenant_id = key_identity.tenant_id
+        await set_tenant_context(db, tenant_id)
         result = await db.execute(
             select(User, Tenant, Membership, ApiKey)
             .join(ApiKey, ApiKey.user_id == User.id)
@@ -85,7 +94,6 @@ async def get_context(
         if not api_key_row:
             raise HTTPException(status_code=401, detail="登录令牌无效或已过期")
         row = api_key_row[:3]
-        tenant_id = row[1].id
         if api_key_row[3].expires_at and api_key_row[3].expires_at < datetime.now(timezone.utc):
             raise HTTPException(status_code=401, detail="API Key 已过期")
         api_key_row[3].last_used_at = datetime.now(timezone.utc)

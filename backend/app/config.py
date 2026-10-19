@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     artifact_dir: str = "./data/artifacts"
     model_timeout_seconds: int = 120
     cors_origins: str = "http://localhost:13000,http://localhost:3000"
+    trusted_hosts: str = "*"
+    upload_max_bytes: int = 26214400
+    upload_max_uncompressed_bytes: int = 104857600
+    knowledge_max_extracted_chars: int = 5000000
     qdrant_url: str = "http://qdrant:6333"
     qdrant_vector_size: int = 1536
     embedding_model: str = "text-embedding-3-small"
@@ -64,6 +68,11 @@ class Settings(BaseSettings):
     gpu_lease_ttl_seconds: int = 3600
     gpu_node_names: str = ""
     sandbox_queue: str = "ai_platform:sandbox_runs"
+    job_stream: str = "ai_platform:jobs"
+    job_consumer_group: str = "enterprise-workers"
+    worker_claim_idle_ms: int = 60000
+    sandbox_runtime_class: str = ""
+    sandbox_ephemeral_storage_mb: int = 256
     evaluation_queue: str = "ai_platform:evaluation_jobs"
     alert_webhook_url: str = ""
     alert_dingtalk_webhook_url: str = ""
@@ -80,6 +89,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+
+    @property
+    def trusted_host_list(self) -> list[str]:
+        return [item.strip() for item in self.trusted_hosts.split(",") if item.strip()] or ["*"]
 
     @property
     def artifact_path(self) -> Path:

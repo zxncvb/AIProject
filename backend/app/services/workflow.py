@@ -1,20 +1,23 @@
 import asyncio
 import json
 import logging
+import os
 import re
+import socket
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 from sqlalchemy import func, select
 
 from ..config import get_settings
 from ..db import AdminSessionLocal
 from ..models import Agent, ComputeUsage, EvaluationJob, GpuLease, ModelProvider, Plugin, Project, SandboxRun, Skill, TenantPolicy, Workflow, WorkflowRun, WorkflowSchedule, WorkflowVersion
 from .knowledge import search_chunks
-from .llm import call_chat
+from .llm import call_chat, call_routed_chat
 from .observability import new_trace_id, run_failures, runs_total, tool_calls
 from .safety import inspect_text
 from .sandbox import build_job_manifest
@@ -24,6 +27,7 @@ QUEUE = "ai_platform:workflow_runs"
 INDEX_QUEUE = "ai_platform:knowledge_index"
 EVALUATION_QUEUE = "ai_platform:evaluation_jobs"
 SANDBOX_QUEUE = "ai_platform:sandbox_runs"
+JOB_KINDS = {"workflow", "knowledge_index", "evaluation", "sandbox"}
 
 
 class WorkflowCancelled(Exception):
@@ -83,22 +87,35 @@ def ordered_nodes(graph: dict[str, Any]) -> list[dict[str, Any]]:
     return [nodes[key] for key in ordered]
 
 
-async def enqueue_run(run_id: str) -> None:
-    redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
+async def enqueue_job(kind: str, resource_id: str, redis: Redis | None = None) -> str:
+    if kind not in JOB_KINDS:
+        raise ValueError(f"unsupported job kind: {kind}")
+    owned = redis is None
+    redis = redis or Redis.from_url(get_settings().redis_url, decode_responses=True)
     try:
-        await redis.rpush(QUEUE, run_id)
+        return await redis.xadd(get_settings().job_stream, {"kind": kind, "resource_id": resource_id, "queued_at": now().isoformat()}, maxlen=100000, approximate=True)
+    finally:
+        if owned:
+            await redis.aclose()
+
+
+async def enqueue_run(run_id: str) -> None:
+    try:
+        await enqueue_job("workflow", run_id)
     except Exception:
         asyncio.create_task(execute_run(run_id))
-    finally:
-        await redis.aclose()
 
 
 async def enqueue_index(document_id: str) -> None:
-    redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
-    try:
-        await redis.rpush(INDEX_QUEUE, document_id)
-    finally:
-        await redis.aclose()
+    await enqueue_job("knowledge_index", document_id)
+
+
+async def enqueue_evaluation(job_id: str) -> None:
+    await enqueue_job("evaluation", job_id)
+
+
+async def enqueue_sandbox(run_id: str) -> None:
+    await enqueue_job("sandbox", run_id)
 
 
 async def execute_index(document_id: str) -> None:
@@ -157,6 +174,10 @@ async def execute_run(run_id: str) -> None:
         started_clock = time.perf_counter()
         try:
             completed, state = await execute_graph(db, run, version)
+            if run.status == "waiting_approval":
+                return
+            if await is_run_cancelled(run.id):
+                raise WorkflowCancelled()
             last_node_id = state.get("last_node_id")
             run.output_json = completed.get(last_node_id, completed) if last_node_id else completed
             run.status, run.finished_at = "succeeded", now()
@@ -204,7 +225,7 @@ async def execute_evaluation(job_id: str) -> None:
                 if safety["blocked"]:
                     results.append({"message": message, "passed": False, "score": 0, "error": "安全策略拦截", "reasons": safety["reasons"]})
                     continue
-                response = await call_chat(db, provider, [{"role": "system", "content": agent.system_prompt}, {"role": "user", "content": safety["text"]}], tenant_id=job.tenant_id)
+                response = await call_routed_chat(db, [{"role": "system", "content": agent.system_prompt}, {"role": "user", "content": safety["text"]}], tenant_id=job.tenant_id, preferred_provider_id=agent.provider_id)
                 answer = response.get("text", "")
                 usage = response.get("usage") or {}
                 total_tokens += int(usage.get("total_tokens", 0))
@@ -229,11 +250,12 @@ async def execute_sandbox(run_id: str) -> None:
         row.status, row.started_at = "running", now()
         await db.commit()
         try:
-            source = row.source_json or {}
-            manifest = build_job_manifest(row.id, row.runtime, source, int(source.get("timeout_seconds", 300)), int(source.get("cpu_millicores", 500)), int(source.get("memory_mb", 512)))
+            request = row.source_json or {}
+            source = request.get("source", request)
+            manifest = build_job_manifest(row.id, row.runtime, source, int(request.get("timeout_seconds", 300)), int(request.get("cpu_millicores", 500)), int(request.get("memory_mb", 512)))
             row.manifest_json = manifest
             row.output_json = {"dispatch": "kubernetes_job", "job_name": manifest["metadata"]["name"], "message": "已生成受限 Job，等待集群沙箱控制器提交"}
-            row.status, row.finished_at = "submitted", now()
+            row.status, row.finished_at = "submitted", None
             await db.commit()
         except Exception as exc:
             row.status, row.error, row.finished_at = "failed", str(exc), now()
@@ -280,8 +302,8 @@ async def dispatch_schedules(redis: Redis) -> None:
             schedule.last_run_at = current
             schedule.next_run_at = current + timedelta(seconds=max(10, schedule.interval_seconds))
         await db.commit()
-    if queued_ids:
-        await redis.rpush(QUEUE, *queued_ids)
+    for run_id in queued_ids:
+        await enqueue_job("workflow", run_id, redis)
 
 
 def next_graph_nodes(graph: dict[str, Any], node: dict[str, Any], output: dict[str, Any]) -> list[str]:
@@ -390,7 +412,7 @@ async def execute_node(db, run: WorkflowRun, node_type: str, node_id: str, confi
         provider = await _provider(db, run.tenant_id, config)
         system = str(resolve(config.get("system", "You are an enterprise assistant."), context))
         prompt = str(resolve(config.get("prompt", "{{input.question}}"), context))
-        result = await call_chat(db, provider, [{"role": "system", "content": system}, {"role": "user", "content": prompt}], tenant_id=run.tenant_id, model=config.get("model"), temperature=float(config.get("temperature", 0.2)), max_tokens=config.get("max_tokens"))
+        result = await call_routed_chat(db, [{"role": "system", "content": system}, {"role": "user", "content": prompt}], tenant_id=run.tenant_id, preferred_provider_id=config.get("provider_id"), model=config.get("model"), temperature=float(config.get("temperature", 0.2)), max_tokens=config.get("max_tokens"))
         return result
     if node_type == "agent":
         agent_id = str(config.get("agent_id", ""))
@@ -404,7 +426,7 @@ async def execute_node(db, run: WorkflowRun, node_type: str, node_id: str, confi
             rows = await search_chunks(db, run.tenant_id, agent.knowledge_base_id, prompt, 5)
             knowledge_context = "\n\n".join(row["content"] for row in rows)
         system = agent.system_prompt + (f"\n\nEnterprise knowledge context:\n{knowledge_context}" if knowledge_context else "")
-        return await call_chat(db, provider, [{"role": "system", "content": system}, {"role": "user", "content": prompt}], tenant_id=run.tenant_id)
+        return await call_routed_chat(db, [{"role": "system", "content": system}, {"role": "user", "content": prompt}], tenant_id=run.tenant_id, preferred_provider_id=agent.provider_id)
     if node_type in {"http", "request"}:
         url = str(resolve(config.get("url", ""), context))
         from urllib.parse import urlparse
@@ -446,17 +468,83 @@ async def execute_node(db, run: WorkflowRun, node_type: str, node_id: str, confi
 
 
 async def worker_loop() -> None:
-    redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
-    while True:
-        await dispatch_schedules(redis)
-        await reconcile_gpu_leases()
-        item = await redis.blpop([QUEUE, INDEX_QUEUE, get_settings().evaluation_queue, get_settings().sandbox_queue], timeout=5)
-        if item:
-            if item[0] == INDEX_QUEUE:
-                await execute_index(item[1])
-            elif item[0] == get_settings().evaluation_queue:
-                await execute_evaluation(item[1])
-            elif item[0] == get_settings().sandbox_queue:
-                await execute_sandbox(item[1])
-            else:
-                await execute_run(item[1])
+    settings = get_settings()
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    consumer = f"{socket.gethostname()}-{os.getpid()}"
+    try:
+        try:
+            await redis.xgroup_create(settings.job_stream, settings.job_consumer_group, id="0-0", mkstream=True)
+        except ResponseError as exc:
+            if "BUSYGROUP" not in str(exc):
+                raise
+
+        # Drain the queues used by earlier releases so upgrades do not lose queued work.
+        legacy_queues = {
+            QUEUE: "workflow",
+            INDEX_QUEUE: "knowledge_index",
+            settings.evaluation_queue: "evaluation",
+            settings.sandbox_queue: "sandbox",
+        }
+        for queue, kind in legacy_queues.items():
+            for _ in range(1000):
+                resource_id = await redis.lpop(queue)
+                if not resource_id:
+                    break
+                await enqueue_job(kind, resource_id, redis)
+
+        while True:
+            await dispatch_schedules(redis)
+            await reconcile_gpu_leases()
+
+            claimed = await redis.xautoclaim(
+                settings.job_stream,
+                settings.job_consumer_group,
+                consumer,
+                settings.worker_claim_idle_ms,
+                start_id="0-0",
+                count=20,
+            )
+            messages = claimed[1] if len(claimed) > 1 else []
+            if not messages:
+                batches = await redis.xreadgroup(
+                    settings.job_consumer_group,
+                    consumer,
+                    {settings.job_stream: ">"},
+                    count=20,
+                    block=5000,
+                )
+                messages = batches[0][1] if batches else []
+
+            for message_id, fields in messages:
+                kind = fields.get("kind", "")
+                resource_id = fields.get("resource_id", "")
+                attempts = int(fields.get("attempts", "0"))
+                try:
+                    if kind == "workflow":
+                        await execute_run(resource_id)
+                    elif kind == "knowledge_index":
+                        await execute_index(resource_id)
+                    elif kind == "evaluation":
+                        await execute_evaluation(resource_id)
+                    elif kind == "sandbox":
+                        await execute_sandbox(resource_id)
+                    else:
+                        raise ValueError(f"unsupported job kind: {kind}")
+                except Exception as exc:
+                    logging.getLogger("enterprise_ai_platform.worker").exception(
+                        "job failed kind=%s resource_id=%s attempt=%s", kind, resource_id, attempts + 1
+                    )
+                    retry_fields = {
+                        "kind": kind,
+                        "resource_id": resource_id,
+                        "queued_at": fields.get("queued_at", now().isoformat()),
+                        "attempts": str(attempts + 1),
+                        "last_error": str(exc)[:1000],
+                    }
+                    target = settings.job_stream if attempts < 4 else f"{settings.job_stream}:dead"
+                    await redis.xadd(target, retry_fields, maxlen=100000, approximate=True)
+                finally:
+                    await redis.xack(settings.job_stream, settings.job_consumer_group, message_id)
+                    await redis.xdel(settings.job_stream, message_id)
+    finally:
+        await redis.aclose()

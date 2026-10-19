@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: enterprise-ai-worker
+  namespace: enterprise-ai
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: enterprise-ai-worker}
+  template:
+    metadata:
+      labels: {app: enterprise-ai-worker}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: worker
+          image: enterprise-ai-platform/backend:latest
+          command: ["python", "-m", "app.worker"]
+          envFrom: [{secretRef: {name: enterprise-ai-secrets}}]
+          resources:
+            requests: {cpu: "500m", memory: "1Gi"}
+            limits: {cpu: "2", memory: "4Gi"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: app-data, mountPath: /app/data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: app-data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

@@ -4,7 +4,9 @@ import axios from "axios";
 const api = axios.create({ baseURL: "/" });
 api.interceptors.request.use((config) => { const token = localStorage.getItem("eai_token"); if (token) config.headers.Authorization = `Bearer ${token}`; return config; });
 const errorText = (error, fallback = "操作失败") => typeof error?.response?.data?.detail === "string" ? error.response.data.detail : fallback;
-const Tag = ({ children }) => <span className="tag green">{children}</span>;
+const displayLabels = { draft: "草稿", published: "已发布", deployed: "已部署", archived: "已归档", pending: "待审批", approved: "已通过", rejected: "已拒绝", active: "运行中", canary: "灰度中", rolled_back: "已回滚", ready: "已就绪", failed: "失败", testing: "检测中", disconnected: "未连接", connected: "已连接", agent: "智能体", workflow: "工作流", application: "应用", skill: "技能", plugin: "插件", model: "模型", keyword: "关键词", regex: "正则", semantic: "语义" };
+const display = (value) => displayLabels[value] || value;
+const Tag = ({ children }) => <span className="tag green">{typeof children === "string" ? display(children) : children}</span>;
 const Note = ({ children }) => children ? <div className="notice">{children}</div> : null;
 const Box = ({ title, subtitle, children, actions }) => <section className="panel"><div className="panel-head"><div><h3>{title}</h3>{subtitle && <small>{subtitle}</small>}</div>{actions}</div>{children}</section>;
 const Title = ({ title, description, actions }) => <div className="page-title"><div><h1>{title}</h1><p>{description}</p></div><div className="page-actions">{actions}</div></div>;
@@ -217,6 +219,7 @@ export function PublishingCenter({ data }) {
 
   const resourceName = (item) => resources.find((resource) => resource.id === item.resource_id && resource.resource_type === item.resource_type)?.name || item.resource_id.slice(0, 12);
   const typeName = { agent: "Agent", workflow: "工作流", application: "应用" };
+  const statusName = { draft: "草稿", published: "已发布", deployed: "已部署", archived: "已归档" };
 
   return <div className="page">
     <Title title="发布管理" description="统一管理 Agent、工作流和应用的版本发布、渠道绑定与审批。" actions={<button className="primary" onClick={bind} disabled={!selectedResource || !channelId}>新增发布绑定</button>} />
@@ -226,7 +229,8 @@ export function PublishingCenter({ data }) {
           {[["agent", "Agent"], ["workflow", "工作流"], ["application", "应用"]].map(([type, label]) => <button key={type} className={resourceType === type ? "active" : ""} onClick={() => setResourceType(type)}>{label}</button>)}
         </div>
         <label className="form-label">资源<select value={selectedResource?.id || ""} onChange={(event) => setResourceId(event.target.value)}><option value="">选择资源</option>{availableResources.map((item) => <option key={item.id} value={item.id}>{item.name} · v{item.version}</option>)}</select></label>
-        {selectedResource && <div className="notice">当前版本：v{selectedResource.version} · 状态：{selectedResource.status}</div>}
+        <label className="form-label">发布渠道<select value={channelId} onChange={(event) => setChannelId(event.target.value)}><option value="">选择渠道</option>{channels.filter((item) => item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}{item.approval_required ? "（需审批）" : ""}</option>)}</select></label>
+        {selectedResource && <div className="notice">当前版本：v{selectedResource.version} · 状态：{statusName[selectedResource.status] || selectedResource.status}</div>}
       </Box>
       <Box title="渠道目录" subtitle={`${channels.length} 个渠道`}>
         <div className="table">{channels.map((item) => <div className="table-row" key={item.id}><b>{item.name}</b><span>{item.code}</span><span>{item.approval_required ? "需要审批" : "直接发布"}</span><Tag>{item.enabled ? "启用" : "停用"}</Tag></div>)}</div>

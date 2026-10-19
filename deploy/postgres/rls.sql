@@ -15,7 +15,11 @@ BEGIN
     'document_chunks', 'skills', 'plugins', 'audit_events', 'workflow_releases',
     'workflow_schedules', 'applications', 'application_versions', 'compute_quotas', 'compute_usage',
     'roles', 'knowledge_base_access', 'mcp_servers', 'model_health_checks', 'tenant_policies', 'scim_tokens',
-    'gpu_leases', 'sandbox_runs', 'evaluation_jobs'
+    'gpu_leases', 'sandbox_runs', 'evaluation_jobs', 'model_conversations',
+    'knowledge_assets', 'agent_events', 'api_keys', 'organizations', 'workspaces',
+    'workspace_members', 'agent_configs', 'agent_versions', 'prompt_templates',
+    'database_connections', 'marketplace_items', 'favorites', 'publish_channels',
+    'publish_bindings', 'approval_requests', 'intervention_rules'
   ] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', table_name);
     EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', table_name);

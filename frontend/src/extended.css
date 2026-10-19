@@ -1,6 +1,23 @@
 .three-col{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
 .file-button{display:inline-flex;align-items:center;gap:8px;border:1px solid #d7e0ec;background:#fff;color:#1b2a41;border-radius:8px;padding:9px 13px;cursor:pointer}
 .file-button input{display:none}
+.experience-layout{grid-template-columns:minmax(220px,.34fr) minmax(0,1fr)}
+.experience-layout .history-item{width:100%;display:grid;justify-content:stretch;text-align:left;margin:7px 0;overflow-wrap:anywhere}
+.experience-layout .history-item.active{background:#e9f3ff;border-color:#8cb9e8;color:#145fae}
+.experience-layout .history-item small{color:#718198}
+.experience-layout .experience-bar{height:auto;min-height:0;display:flex;justify-content:flex-start;align-items:end;flex-wrap:wrap;gap:10px;padding:12px;margin-bottom:12px;background:#f7fbff;border-style:solid}
+.experience-layout .experience-bar label:not(.file-button){display:grid;gap:5px;color:#42536a;font-size:12px}
+.experience-layout .experience-bar select{max-width:280px}
+.experience-layout .chat-message p{white-space:pre-wrap;overflow-wrap:anywhere}
+.run-table .table-head,.run-table .table-row{grid-template-columns:1.1fr 1.1fr .7fr 1.4fr 1.4fr}
+.run-table .button-row{flex-wrap:wrap}
+.policy-table .table-head,.policy-table .table-row{grid-template-columns:1fr 3fr 1fr}
+.policy-table .button-row{flex-wrap:wrap}
+.policy-table label{font-weight:400;white-space:nowrap}
+.stat-card{padding:14px 16px;border:1px solid #dce8f5;border-radius:10px;background:#fff;display:grid;gap:5px}
+.stat-card small{color:#718198}.stat-card b{font-size:22px;color:#172a44}
+@media(max-width:1100px){.experience-layout{grid-template-columns:1fr}}
+@media(max-width:700px){.run-table .table-head,.run-table .table-row,.policy-table .table-head,.policy-table .table-row{grid-template-columns:1fr 1fr}.run-table .table-head span:nth-child(n+3){display:none}}
 .catalog-logo{width:36px;height:36px;display:grid;place-items:center;border-radius:10px;background:#e5f1ff;color:#1769d1;margin-bottom:10px}
 .check-list{display:grid;gap:8px}.check-item{display:flex;align-items:flex-start;gap:9px;padding:10px;border:1px solid #e1e8f0;border-radius:8px;background:#fbfdff;cursor:pointer}.check-item input{margin-top:4px}.check-item span{display:grid;gap:4px}.check-item small{color:#718198;overflow-wrap:anywhere}
 aside{overflow-y:auto}aside::-webkit-scrollbar{width:6px}aside::-webkit-scrollbar-thumb{background:#3c70aa;border-radius:6px}

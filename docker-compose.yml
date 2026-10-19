@@ -107,11 +107,37 @@ services:
       - "19093:9093"
     restart: unless-stopped
 
+  migrate:
+    build: ./backend
+    command: ["alembic", "-c", "/app/alembic.ini", "upgrade", "head"]
+    environment:
+      DATABASE_ADMIN_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}@postgres:5432/platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  db-security:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}
+      POSTGRES_RUNTIME_PASSWORD: ${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD in .env or the shell}
+    command: ["sh", "/security/provision-runtime.sh"]
+    volumes:
+      - ./deploy/postgres:/security:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
   backend:
     build: ./backend
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}@postgres:5432/platform
+      DATABASE_URL: postgresql+asyncpg://platform_runtime:${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD in .env or the shell}@postgres:5432/platform
       DATABASE_ADMIN_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}@postgres:5432/platform
       REDIS_URL: redis://redis:6379/0
       QDRANT_URL: http://qdrant:6333
@@ -123,6 +149,8 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
+      db-security:
+        condition: service_completed_successfully
     volumes:
       - platform-artifacts:/app/data
     ports:
@@ -134,7 +162,7 @@ services:
     command: ["python", "-m", "app.worker"]
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}@postgres:5432/platform
+      DATABASE_URL: postgresql+asyncpg://platform_runtime:${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD in .env or the shell}@postgres:5432/platform
       DATABASE_ADMIN_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}@postgres:5432/platform
       REDIS_URL: redis://redis:6379/0
       QDRANT_URL: http://qdrant:6333
@@ -146,6 +174,8 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
+      db-security:
+        condition: service_completed_successfully
     volumes:
       - platform-artifacts:/app/data
     restart: unless-stopped
@@ -155,7 +185,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "13000:80"
+      - "13000:8080"
     restart: unless-stopped
 
 volumes:

@@ -3,10 +3,10 @@ kind: Kustomization
 namespace: enterprise-ai
 resources:
   - namespace.yaml
-  - secrets.example.yaml
   - backend.yaml
   - frontend.yaml
-  - worker-gpu.yaml
+  - worker.yaml
+  - priority-runtime.yaml
   - ingress.yaml
   - hpa.yaml
   - networkpolicy.yaml

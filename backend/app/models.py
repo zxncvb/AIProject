@@ -106,6 +106,7 @@ class Project(Base):
     __table_args__ = (UniqueConstraint("tenant_id", "slug", name="uq_project_tenant_slug"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(160))
     slug: Mapped[str] = mapped_column(String(80))
     description: Mapped[str] = mapped_column(Text, default="")
@@ -125,6 +126,18 @@ class ModelProvider(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     config_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ModelConversation(Base):
+    __tablename__ = "model_conversations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    provider_id: Mapped[str] = mapped_column(ForeignKey("model_providers.id"), index=True)
+    title: Mapped[str] = mapped_column(String(160), default="新会话")
+    messages_json: Mapped[list[dict[str, Any]]] = mapped_column(JsonType, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class Agent(Base):
@@ -179,12 +192,15 @@ class WorkflowVersion(Base):
 
 class WorkflowRun(Base):
     __tablename__ = "workflow_runs"
+    __table_args__ = (UniqueConstraint("tenant_id", "workflow_id", "created_by", "idempotency_key", name="uq_workflow_run_idempotency"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflows.id"), index=True)
     workflow_version: Mapped[int] = mapped_column(Integer)
     cost_center: Mapped[str] = mapped_column(String(120), default="unassigned", index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    retry_of_id: Mapped[str | None] = mapped_column(ForeignKey("workflow_runs.id"), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     input_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
     state_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)

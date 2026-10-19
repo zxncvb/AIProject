@@ -79,6 +79,7 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=2, max_length=160)
     slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,78}[a-z0-9]$", max_length=80)
     description: str = ""
+    workspace_id: str | None = None
 
 
 class ProviderCreate(BaseModel):
@@ -128,6 +129,7 @@ class WorkflowRunRequest(BaseModel):
     version: int | None = None
     environment: str = Field(default="production", pattern=r"^(dev|staging|production)$")
     cost_center: str | None = Field(default=None, max_length=120)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class WorkflowWebhookRequest(BaseModel):
@@ -316,6 +318,11 @@ class WorkspaceCreate(BaseModel):
     description: str = ""
 
 
+class WorkspaceMemberUpsert(BaseModel):
+    user_id: str
+    role: str = Field(default="viewer", pattern=r"^(owner|admin|editor|viewer)$")
+
+
 class OrganizationCreate(BaseModel):
     name: str = Field(min_length=2, max_length=160)
     code: str = Field(default="", max_length=80)
@@ -365,6 +372,15 @@ class DatabaseQuery(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
 
 
+class DatabaseColumnPolicy(BaseModel):
+    allowed_roles: list[str] = Field(default_factory=list)
+    mask: bool = False
+
+
+class DatabasePolicyUpdate(BaseModel):
+    columns: dict[str, DatabaseColumnPolicy] = Field(default_factory=dict)
+
+
 class MarketplaceCreate(BaseModel):
     resource_type: str = Field(pattern=r"^(agent|skill|plugin|model)$")
     resource_id: str
@@ -399,6 +415,8 @@ class ModelExperienceRequest(BaseModel):
     provider_id: str | None = None
     message: str = Field(min_length=1, max_length=12000)
     conversation_id: str | None = None
+    knowledge_base_id: str | None = None
+    attachments: list[str] = Field(default_factory=list, max_length=3)
 
 
 class FavoriteRequest(BaseModel):

@@ -4,7 +4,7 @@ metadata:
   name: enterprise-ai
   namespace: enterprise-ai
   annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: 50m
+    nginx.ingress.kubernetes.io/proxy-body-size: 25m
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
 spec:
   ingressClassName: nginx

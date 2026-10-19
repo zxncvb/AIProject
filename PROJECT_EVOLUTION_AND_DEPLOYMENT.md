@@ -219,11 +219,11 @@ BOOTSTRAP_ADMIN_PASSWORD=替换为管理员初始密码
 docker compose up -d --build
 ```
 
-执行数据库迁移：
+启动过程会自动按顺序执行：
 
-```powershell
-docker compose exec backend alembic -c /app/alembic.ini upgrade head
-```
+1. `migrate` 使用 `DATABASE_ADMIN_URL` 执行 Alembic。
+2. `db-security` 创建或更新 `platform_runtime`，授权业务表并应用 RLS。
+3. 前两步成功后，后端和 Worker 才会启动。
 
 检查服务：
 
@@ -255,24 +255,11 @@ POSTGRES_PASSWORD=数据库管理员密码
 POSTGRES_RUNTIME_PASSWORD=运行时角色密码
 ```
 
-初始化运行时角色：
+基础 Compose 已默认执行运行时角色配置和租户策略。检查一次性任务：
 
 ```powershell
-Get-Content -Raw -Encoding utf8 deploy/postgres/enable-rls.sql |
-  docker compose exec -T postgres psql -U platform -d platform
-```
-
-应用租户策略：
-
-```powershell
-Get-Content -Raw -Encoding utf8 deploy/postgres/rls.sql |
-  docker compose exec -T postgres psql -U platform -d platform
-```
-
-使用 RLS 配置重新启动后端和 Worker：
-
-```powershell
-docker compose -f docker-compose.yml -f docker-compose.rls.yml up -d backend worker
+docker compose ps -a migrate db-security
+docker compose logs migrate db-security
 ```
 
 验证：
@@ -312,9 +299,9 @@ Invoke-RestMethod http://localhost:18080/readyz
 ### 5.2 普通升级
 
 ```powershell
-docker compose build backend worker frontend
-docker compose exec backend alembic -c /app/alembic.ini upgrade head
-docker compose -f docker-compose.yml -f docker-compose.rls.yml up -d backend worker frontend
+docker compose up -d --build
+docker compose ps -a
+docker compose logs migrate db-security backend worker frontend
 ```
 
 ### 5.3 数据库回滚
@@ -715,8 +702,9 @@ OIDC_ALLOWED_DOMAINS=example.com
 
 ```powershell
 docker compose logs --tail=200 backend
-docker compose exec backend alembic -c /app/alembic.ini current
-docker compose exec backend alembic -c /app/alembic.ini upgrade head
+docker compose run --rm migrate alembic -c /app/alembic.ini current
+docker compose run --rm migrate
+docker compose run --rm --no-deps db-security
 ```
 
 ### 页面显示旧版本
@@ -791,12 +779,55 @@ Get-Content -Raw -Encoding utf8 deploy/postgres/rls.sql |
 升级命令：
 
 ```powershell
-docker compose build backend worker frontend
-docker compose -f docker-compose.yml -f docker-compose.rls.yml up -d backend worker frontend
-docker compose exec -T backend alembic upgrade head
+docker compose up -d --build
+docker compose ps
 ```
 
 下一阶段重点不是继续堆页面，而是接入真实企业环境，并围绕安全、成本、质量、可用性和业务价值做生产验收。
+
+## 十七、2026-10-20：可靠队列、工作空间隔离与知识库交互修复
+
+本轮针对“代码已有但生产边界仍松散”和知识库实际使用故障进行了集中修复。
+
+### 已解决问题
+
+1. **异步任务可能丢失**：原有 Redis List 的 `BLPOP` 在 Worker 取出后崩溃会丢任务。现在统一使用 Redis Streams 消费组，支持 pending 任务认领、重试计数、死信流和旧队列迁移。
+2. **工作空间只有展示、没有真正隔离**：项目新增 `workspace_id`，应用、Agent、工作流、运行和知识库通过项目继承权限；提示词和数据库连接按自身工作空间过滤。
+3. **缺少空间成员管理**：新增成员列表、添加/更新角色、移除接口；保护唯一所有者并写入审计日志。
+4. **基础 Compose 绕过 RLS**：普通业务连接改用 `platform_runtime`，管理员连接仅用于迁移、引导、登录发现和系统 Worker；Compose 自动完成迁移、角色配置和 RLS 重放。
+5. **Kubernetes 清单不能完整闭环**：修正 Worker 名称/PDB、命名空间、前端到后端服务解析、运行目录、DNS 与同命名空间网络策略，以及 CD 中迁移和镜像发布目标。
+6. **知识库重复创建返回 500**：后端捕获唯一约束并返回 409 与中文原因；前端会识别同名知识库并直接打开，不再重复提交。
+7. **知识库列表点击缺少反馈**：点击后立即切换详情、加载文档、清理旧检索结果并显示当前打开的知识库。
+8. **顶部新建按钮误提交默认名称**：改为聚焦名称输入框，只有填写名称并点击表单“新建”后才创建。
+9. **文档上传资源边界不足**：增加文件类型、原始大小、压缩展开大小和提取文本字符数限制，拦截异常 Office 压缩包。
+10. **浏览器与容器基线不足**：前端改用非 root Nginx，增加 CSP 等响应头，移除公网 `/metrics` 代理，并补齐 25 MB 代理上传限制。
+
+### 本轮迁移
+
+- `20261020_workspace_isolation`：新增项目工作空间外键，把历史项目、Agent 配置、提示词和数据库连接回填到默认工作空间。
+- `20261020_rls_enforcement`：对当前全部租户表启用策略，并为已存在的 `platform_runtime` 授予业务访问权限。
+
+### 验证结果
+
+- Docker Compose 配置校验通过。
+- Alembic 已升级至 `20261020_rls_enforcement`。
+- `migrate` 和 `db-security` 均以退出码 0 完成。
+- 后端测试和前端生产构建通过。
+- `/healthz`、登录、项目、知识库列表均正常。
+- 同名知识库创建真实返回 409；不同名知识库可创建并立即出现在列表；验证记录已删除。
+
+### 仍需企业环境完成的验收
+
+- 使用两个真实租户和多个工作空间进行越权/渗透测试。
+- 在 Kubernetes 中验证 ExternalSecret、PostgreSQL 运行时角色、Ingress 域名、NetworkPolicy 和沙箱 RuntimeClass。
+- 对 Redis Streams 执行 Worker 强杀、重复投递和积压压测，并配置死信流告警。
+- 对 PDF/Office 文档接入企业病毒扫描或内容安全服务；当前实现的是格式与资源上限，不等同于恶意文件扫描。
+
+### 本轮文档修改点
+
+- `README.md`：改为当前真实的一键迁移与 RLS 部署方式，更新必填密钥和 Kubernetes 前置条件。
+- `PROJECT_EVOLUTION_AND_DEPLOYMENT.md`：增加本节，并修正首次部署、升级和 RLS 命令。
+- `CHANGELOG.md`：建立后续每轮都追加的统一修改记录。
 
 ## 十五、参考界面补齐记录（本轮）
 
@@ -805,3 +836,36 @@ docker compose exec -T backend alembic upgrade head
 新增后端资源包括组织与工作区、Agent 配置/版本/事件/API Key、提示词模板、数据库连接与 schema 快照、知识扩展资源、市场资源、收藏、发布渠道与绑定、审批申请、干预规则等。Agent 已覆盖导入、导出、复制、删除、资源编排、触发器和反馈统计；数据库问答已支持 PostgreSQL、MySQL、SQL Server、Oracle 的只读实时查询与表结构同步，其中 SQL Server 需要在企业镜像中安装 Microsoft ODBC Driver。
 
 验收结果：前端 Vite 构建通过；后端 pytest `10 passed`；数据库迁移已升级至 `20261019_finops_observability`；登录、工作区、模型目录、提示词、数据库、市场、发布绑定、审批、安全、FinOps、观测等接口均返回预期结果；Docker Compose 中前后端、Worker、PostgreSQL、Redis、Qdrant、Prometheus、Grafana 等服务正常运行。
+
+## 十六、2026-10-20：6 条生产主线与 15 个能力检查点
+
+本节按代码和本地验收证据记录状态，不把“有配置入口”算作在企业生产环境完成验收。
+
+| 生产主线 | 本轮已落地 | 仍需外部环境验收 |
+| --- | --- | --- |
+| 身份与多租户 | 沿用 OIDC/LDAP/SCIM、角色控制；模型会话按租户和用户隔离，运行重试/取消增加归属校验 | 接入企业身份源，验证组映射、离职禁用、跨租户渗透测试 |
+| 算力与沙箱 | Job 强制真实命令、非 root、只读根目录、临时存储限制、日志回收和终态清理 | 集群实际执行、RuntimeClass/gVisor/Kata、GPU 设备绑定、网络隔离实测 |
+| 模型与知识 | 健康排序、暂时错误重试、回退和熔断；模型体验保存会话、文本附件、知识引用 | 真实模型负载、故障切换压测、OCR/多模态输入 |
+| 应用与工作流 | 全代码批处理调用、版本部署校验；运行幂等、失败任务重试、审批等待状态修复 | 全代码 CI/镜像构建、交互式应用托管、长事务补偿及并发压测 |
+| 安全与数据 | 字段级可见性/脱敏、查询审计增强；发布绑定校验实际发布版本 | 数据库原生只读角色/行级隔离、DLP 审核、渠道端到端验收 |
+| 观测与运维 | 运行中心可查看详情、失败任务、取消/重试；沿用现有 Prometheus/Grafana/FinOps | 多副本 HA、跨区域恢复演练、SLO 告警闭环 |
+
+15 个能力检查点的当前状态：
+
+1. 模型提供商路由与健康排序：已实现；真实故障注入待验收。
+2. 模型调用暂时错误重试：已实现；第三方限流策略需按供应商调优。
+3. 模型回退与熔断：已实现配置型回退；需配置 `fallback_provider_ids` 并压测。
+4. 模型体验会话：已实现用户隔离、列表、查看和删除。
+5. 知识库引用：已实现片段检索与引用展示；需要业务知识准确率评测。
+6. 文本附件：已实现受限文本输入；图片、PDF 即时解析/OCR 未实现。
+7. 工作流幂等：已实现 API 键和数据库唯一约束；调用方需传 `idempotency_key`。
+8. 失败任务重试：已实现新运行记录和来源关联；业务副作用补偿仍需逐节点定义。
+9. 人工审批等待：已修复误标记成功；企业审批策略仍需对接。
+10. 全代码沙箱：已实现更严格 Job 模板和控制器日志/清理；本地 Compose 不执行 Job。
+11. 全代码应用调用：已接入沙箱批任务，公开调用必须带密钥；不是 Web 服务托管或自动镜像构建。
+12. 数据库字段权限：已实现管理员策略与返回结果脱敏；不能代替数据库原生最小权限。
+13. 发布版本校验：已实现对 Agent、工作流、应用当前发布版本的核验；外部渠道回调待联调。
+14. 中文界面：新页面和状态已中文化；当前源码扫描无 UTF-8 替换字符，仍需在目标浏览器逐屏验收。
+15. 可观测入口：运行详情、失败列表及原有指标可用；生产告警值班和恢复演练待企业执行。
+
+本轮本地验收：数据库迁移至 `20261020_workflow_reliability`，后端 pytest `14 passed`，前端容器 Vite 构建成功，`/healthz` 与 `/readyz` 返回 200，首页响应声明 `charset=utf-8`。这些是本地功能验收，不等同于上述生产环境验收。迁移和容器升级顺序请以 README 中最新命令为准；密钥只放入环境变量或 Secret，不写入仓库。

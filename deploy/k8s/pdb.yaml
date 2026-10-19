@@ -12,10 +12,10 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: enterprise-ai-worker-gpu
+  name: enterprise-ai-worker
   namespace: enterprise-ai
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: enterprise-ai-worker-gpu
+      app: enterprise-ai-worker

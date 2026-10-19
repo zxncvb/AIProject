@@ -11,6 +11,11 @@ spec:
     metadata:
       labels: {app: enterprise-ai-backend}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: backend
           image: enterprise-ai-platform/backend:latest
@@ -28,11 +33,30 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: app-data, mountPath: /app/data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: app-data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: enterprise-ai-backend
+  namespace: enterprise-ai
+spec:
+  selector: {app: enterprise-ai-backend}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+# Compatibility alias used by the same nginx.conf in Docker Compose and Kubernetes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
   namespace: enterprise-ai
 spec:
   selector: {app: enterprise-ai-backend}

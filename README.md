@@ -2,9 +2,9 @@
 
 这是一个可通过 Docker 部署的企业级 AI 中台，包含多租户、项目与环境、RBAC、模型与算力、智能体、工作流、知识库、技能、插件、审计、可观测与 Kubernetes 部署能力。
 
-## 本次已实现的八项生产能力
+## 已实现的主要生产能力
 
-1. PostgreSQL RLS：租户策略已启用，API/Worker 可使用独立的 `platform_runtime` 非 owner 账号运行。
+1. PostgreSQL RLS：Docker Compose 会执行迁移、创建独立的 `platform_runtime` 非 owner 账号并应用租户策略；生产仍需执行跨租户验收。
 2. 灰度发布：按稳定哈希进行确定性流量分配，支持生产环境灰度、手工回滚和 Prometheus 错误率自动回滚脚本。
 3. CI/CD：GitHub Actions 构建并推送前后端镜像、数据库迁移、Kubernetes 发布、评测门禁和失败回滚。
 4. Kubernetes：命名空间、Deployment、GPU Worker、Ingress、HPA、NetworkPolicy、Secret 示例和 Kustomize。
@@ -23,7 +23,8 @@
 
 ```powershell
 Copy-Item .env.example .env
-# 生产环境请修改 APP_SECRET_KEY、APP_ENCRYPTION_KEY、BOOTSTRAP_ADMIN_PASSWORD、POSTGRES_PASSWORD 等密钥
+# 生产环境必须设置 APP_SECRET_KEY、APP_ENCRYPTION_KEY、BOOTSTRAP_ADMIN_PASSWORD、
+# POSTGRES_PASSWORD、POSTGRES_RUNTIME_PASSWORD、GRAFANA_ADMIN_PASSWORD 等密钥
 docker compose up -d --build
 ```
 
@@ -55,11 +56,25 @@ docker compose up -d --build
 {
   "public": true,
   "workflow_id": "已发布工作流 ID",
-  "app_key": "可选的调用密钥"
+  "app_key_sha256": "推荐：公开调用密钥的 SHA-256 十六进制摘要"
 }
 ```
 
 ## 优先级能力（当前版本）
+
+### 2026-10-20 可靠性与中文界面补强
+
+- 模型体验支持当前用户的持久化会话、文本附件（每个 16 KiB、最多 3 个）、知识库检索引用和 Token 记账；附件不是图片/OCR，也没有宣称联网搜索。
+- 工作流运行支持幂等键、失败任务列表、失败/取消后重试、取消权限检查；人工审批等待状态不会误记为成功。
+- 模型网关支持暂时错误重试、租户内健康排序、配置回退提供商和短时熔断；只有在提供商配置回退 ID 后才会跨提供商切换。
+- 全代码应用通过受限 Kubernetes Job 批处理运行。必须提供真实命令和运行时清单；本地 Docker Compose 不包含 Kubernetes 控制器，不能把“已部署”当作本地可执行。
+- 公开应用必须显式配置 `public: true`；全代码公开调用必须配置密钥，公开详情接口不再回传源码或运行时清单。建议只保存 `app_key_sha256`，不要保存明文密钥。
+- 数据库查询增加按角色的字段可见性/结果脱敏策略及管理员页面。此策略只约束 API 返回值，不替代数据库自身的只读账号、行级权限和 SQL 审核。
+- 应用中心、模型体验、运行中心改为可操作的中文页面；前端 UTF-8 构建，状态显示采用中文映射。
+
+升级已有数据时，请先备份数据库，再执行 `docker compose up -d --build`。Compose 会先运行一次性 `migrate` 和 `db-security` 服务，迁移成功并重新应用 RLS 后，才启动后端和 Worker；任一步失败都会阻止业务服务带病启动。
+
+实际生产验收仍需要企业提供 Kubernetes 集群/容器隔离运行时、模型和密钥、OIDC/LDAP 身份源，以及备份恢复和故障演练环境。完整清单见 [PROJECT_EVOLUTION_AND_DEPLOYMENT.md](PROJECT_EVOLUTION_AND_DEPLOYMENT.md)。
 
 ### 本轮优化（2026-10-20）
 
@@ -82,10 +97,9 @@ docker compose up -d --build
 ### 重新部署与升级
 
 ```powershell
-docker compose build backend worker frontend
-docker compose -f docker-compose.yml -f docker-compose.rls.yml up -d backend worker frontend
-docker compose exec -T backend alembic upgrade head
-Get-Content -Raw -Encoding utf8 deploy/postgres/rls.sql | docker compose exec -T postgres psql -U platform -d platform
+docker compose up -d --build
+docker compose ps -a
+docker compose logs migrate db-security backend worker
 ```
 
 Kubernetes 环境还需部署 `deploy/k8s/priority-runtime.yaml`，并把 PostgreSQL、Redis、Qdrant 换成企业运维的高可用 Operator 集群。`deploy/k8s/stateful-ha.example.yaml` 仅为 Operator 配置参考，必须在目标集群完成备份恢复、故障切换和数据一致性验收后再上线。
@@ -96,19 +110,18 @@ Kubernetes 环境还需部署 `deploy/k8s/priority-runtime.yaml`，并把 Postgr
 ./deploy/acceptance/priority-runtime.ps1 -Password '你的管理员密码'
 ```
 
-## 启用运行时 RLS
+## 运行时 RLS
 
-当前目录已提供 `docker-compose.rls.yml`。先确保 `.env` 中存在 `POSTGRES_RUNTIME_PASSWORD` 和 `POSTGRES_PASSWORD`，再执行：
+基础 `docker-compose.yml` 已默认启用独立运行时账号和 RLS。先确保 `.env` 中同时存在 `POSTGRES_RUNTIME_PASSWORD` 和 `POSTGRES_PASSWORD`，再执行：
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.rls.yml up -d backend worker
+docker compose up -d --build
 ```
 
-首次部署或迁移环境可执行：
+`migrate` 使用数据库管理员连接执行 Alembic；`db-security` 随后创建/更新 `platform_runtime`、授予最小业务表权限并应用 `deploy/postgres/rls.sql`。以下命令只用于策略维护或故障恢复后的手工重放：
 
 ```powershell
-Get-Content -Raw deploy/postgres/enable-rls.sql | docker compose exec -T postgres psql -U platform -d platform
-Get-Content -Raw deploy/postgres/rls.sql | docker compose exec -T postgres psql -U platform -d platform
+docker compose run --rm db-security
 ```
 
 生产环境请把示例密码替换为随机长密码，并使用 Secret/ExternalSecret 管理，不要把真实密钥提交到代码仓库。
@@ -129,7 +142,7 @@ Get-Content -Raw deploy/postgres/rls.sql | docker compose exec -T postgres psql 
 
 ## Kubernetes
 
-生产环境需先准备真实 Secret、镜像仓库、Ingress 域名、PostgreSQL/Redis/Qdrant 地址和 GPU 节点，然后：
+生产环境需先准备真实 Secret（名称为 `enterprise-ai-secrets`）、镜像仓库、Ingress 域名、PostgreSQL/Redis/Qdrant 地址和 GPU 节点，然后：
 
 ```powershell
 kubectl apply -k deploy/k8s
