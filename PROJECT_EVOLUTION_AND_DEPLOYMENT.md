@@ -750,6 +750,15 @@ Get-Content -Raw -Encoding utf8 deploy/postgres/rls.sql |
 - Qdrant 是否正常
 - `docker compose logs worker`
 
+### 本轮补强（API Key、知识库和扩展治理）
+
+- API Key 现在只允许申请已登记的公开调用权限：`agent:invoke`、`workflow:run`；空权限、未知权限、已过期密钥都会被后端拒绝。
+- Agent 和 Workflow 对外接口支持 `Authorization: Bearer eai_...` 或 `X-API-Key`，并继续执行租户、角色、预算和安全策略校验。
+- 知识库上传按 SHA-256 内容指纹去重；问答、术语、图谱、数据源资产会在写入前检查必需字段和数据类型。
+- Skill、插件和 MCP manifest 统一经过扩展能力白名单校验，插件仍需审批后才能运行。
+- PostgreSQL 与 MySQL 已支持连接测试、schema 同步和只读查询；SQL Server/Oracle 需要在企业镜像中接入对应驱动。
+- 回归结果：Docker backend/worker 构建成功，pytest `8 passed`，`/healthz` 与 `/readyz` 正常。
+
 ## 十三、结论
 
 当前项目已经具备一个可运行的企业 AI 中台基础版本：可以部署、登录、创建企业 AI 资源、运行工作流、管理知识库、接入模型、接入插件、执行审计并进行基本的生产观测。

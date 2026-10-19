@@ -171,6 +171,8 @@ PERMISSION_CATALOG = [
     {"key": "audit.read", "name": "查看审计与观测"},
 ]
 
+PUBLIC_API_SCOPES = {"agent:invoke", "workflow:run"}
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -205,12 +207,40 @@ async def tenant_policy(db: AsyncSession, tenant_id: str) -> TenantPolicy:
 
 
 def validate_extension_manifest(manifest: dict[str, Any]) -> None:
+    if not isinstance(manifest, dict):
+        raise HTTPException(status_code=422, detail="扩展 manifest 必须是 JSON 对象")
+    if manifest.get("version") is not None and not isinstance(manifest.get("version"), (str, int)):
+        raise HTTPException(status_code=422, detail="扩展 manifest.version 必须是字符串或数字")
     capabilities = manifest.get("capabilities") or []
     if not isinstance(capabilities, list):
         raise HTTPException(status_code=422, detail="扩展 capabilities 必须是数组")
     invalid = sorted(set(str(item) for item in capabilities) - get_settings().extension_capability_list)
     if invalid:
         raise HTTPException(status_code=422, detail=f"扩展能力未获批准: {', '.join(invalid)}")
+
+
+def validate_knowledge_asset(asset_type: str, content: dict[str, Any]) -> None:
+    """Validate typed knowledge assets before they enter the tenant knowledge space."""
+    if not isinstance(content, dict):
+        raise HTTPException(status_code=422, detail="知识资产内容必须是 JSON 对象")
+    requirements = {
+        "qa": ("question", "answer"),
+        "term": ("term", "definition"),
+        "graph": ("nodes", "edges"),
+        "datasource": ("type", "config"),
+    }
+    required = requirements.get(asset_type)
+    if not required:
+        raise HTTPException(status_code=422, detail=f"不支持的知识资产类型: {asset_type}")
+    missing = [key for key in required if key not in content]
+    if missing:
+        raise HTTPException(status_code=422, detail=f"{asset_type} 知识资产缺少字段: {', '.join(missing)}")
+    if asset_type in {"qa", "term"} and any(not isinstance(content[key], str) or not content[key].strip() for key in required):
+        raise HTTPException(status_code=422, detail=f"{asset_type} 知识资产字段必须是非空字符串")
+    if asset_type == "graph" and (not isinstance(content["nodes"], list) or not isinstance(content["edges"], list)):
+        raise HTTPException(status_code=422, detail="graph 知识资产的 nodes 和 edges 必须是数组")
+    if asset_type == "datasource" and (not isinstance(content["type"], str) or not isinstance(content["config"], dict)):
+        raise HTTPException(status_code=422, detail="datasource 知识资产需要字符串 type 和对象 config")
 
 
 async def bootstrap() -> None:
@@ -509,8 +539,16 @@ async def list_api_keys(ctx: Context, db: AsyncSession = Depends(get_db)):
 
 @app.post("/api/me/api-keys")
 async def create_api_key(body: ApiKeyCreate, ctx: Context, db: AsyncSession = Depends(get_db)):
+    scopes = list(dict.fromkeys(str(scope).strip() for scope in body.scopes if str(scope).strip()))
+    unsupported = sorted(set(scopes) - PUBLIC_API_SCOPES)
+    if unsupported:
+        raise HTTPException(status_code=422, detail=f"不支持的 API Key 权限: {', '.join(unsupported)}")
+    if not scopes:
+        raise HTTPException(status_code=422, detail="API Key 至少需要一个调用权限")
+    if body.expires_at and body.expires_at <= utcnow():
+        raise HTTPException(status_code=422, detail="API Key 过期时间必须晚于当前时间")
     raw = f"eai_{secrets.token_urlsafe(30)}"
-    row = ApiKey(tenant_id=ctx.tenant_id, user_id=ctx.user_id, name=body.name, key_prefix=raw[:12], key_hash=hashlib.sha256(raw.encode()).hexdigest(), scopes_json=body.scopes, expires_at=body.expires_at)
+    row = ApiKey(tenant_id=ctx.tenant_id, user_id=ctx.user_id, name=body.name, key_prefix=raw[:12], key_hash=hashlib.sha256(raw.encode()).hexdigest(), scopes_json=scopes, expires_at=body.expires_at)
     db.add(row)
     try:
         await db.flush()
@@ -1817,7 +1855,8 @@ def workflow_webhook_token(workflow_id: str) -> str:
 def require_api_scope(ctx: RequestContext, scope: str) -> None:
     """JWT 管理调用不受 API Key scope 限制；API Key 必须显式声明调用范围。"""
     api_scopes = {item[4:] for item in ctx.custom_permissions if item.startswith("api:")}
-    if api_scopes and scope not in api_scopes:
+    has_api_key = any(item.startswith("api:") for item in ctx.custom_permissions)
+    if has_api_key and scope not in api_scopes:
         raise HTTPException(status_code=403, detail=f"API Key 缺少权限: {scope}")
 
 
@@ -1986,6 +2025,10 @@ async def upload_document(kb_id: str, ctx: EditorContext, file: UploadFile = Fil
         raise HTTPException(status_code=404, detail="知识库不存在")
     await require_kb_access(kb_id, ctx, db, write=True)
     raw = await file.read()
+    document_checksum = checksum(raw)
+    duplicate = await db.scalar(select(Document).where(Document.kb_id == kb.id, Document.tenant_id == ctx.tenant_id, Document.checksum == document_checksum))
+    if duplicate:
+        raise HTTPException(status_code=409, detail=f"知识库中已存在同内容文档: {duplicate.title}")
     filename = (file.filename or "").lower()
     if filename.endswith(".pdf"):
         try:
@@ -2009,7 +2052,7 @@ async def upload_document(kb_id: str, ctx: EditorContext, file: UploadFile = Fil
         content = raw.decode("utf-8", errors="replace")
     if not content.strip():
         raise HTTPException(status_code=422, detail="文档没有可索引的文本内容")
-    document = Document(tenant_id=ctx.tenant_id, kb_id=kb.id, title=file.filename or "uploaded-document", source="upload", content=content, checksum=checksum(raw), status="indexing", created_by=ctx.user_id)
+    document = Document(tenant_id=ctx.tenant_id, kb_id=kb.id, title=file.filename or "uploaded-document", source="upload", content=content, checksum=document_checksum, status="indexing", created_by=ctx.user_id)
     db.add(document)
     await db.flush()
     chunks = []
@@ -2091,6 +2134,7 @@ async def create_kb_asset(kb_id: str, body: KnowledgeAssetCreate, ctx: EditorCon
     if not kb:
         raise HTTPException(status_code=404, detail="知识库不存在")
     await require_kb_access(kb_id, ctx, db, write=True)
+    validate_knowledge_asset(body.asset_type, body.content)
     row = KnowledgeAsset(tenant_id=ctx.tenant_id, kb_id=kb_id, asset_type=body.asset_type, name=body.name, description=body.description, content_json=body.content, status=body.status, created_by=ctx.user_id)
     db.add(row)
     try:
@@ -2109,6 +2153,7 @@ async def update_kb_asset(asset_id: str, body: KnowledgeAssetCreate, ctx: Editor
     if not row:
         raise HTTPException(status_code=404, detail="知识资源不存在")
     await require_kb_access(row.kb_id, ctx, db, write=True)
+    validate_knowledge_asset(body.asset_type, body.content)
     row.name, row.description, row.content_json, row.status = body.name, body.description, body.content, body.status
     await audit(db, ctx, "knowledge.asset.update", "knowledge_asset", row.id, {"status": row.status})
     await db.commit()
@@ -2138,6 +2183,7 @@ async def create_skill(body: SkillCreate, ctx: EditorContext, db: AsyncSession =
     project = await db.scalar(select(Project).where(Project.id == body.project_id, Project.tenant_id == ctx.tenant_id))
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+    validate_extension_manifest(body.manifest)
     row = Skill(tenant_id=ctx.tenant_id, project_id=project.id, name=body.name, version=body.version, description=body.description, instructions=body.instructions, manifest_json=body.manifest, created_by=ctx.user_id)
     db.add(row)
     await db.flush()
