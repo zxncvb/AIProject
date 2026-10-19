@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
@@ -7,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_db, set_tenant_context
-from .models import Membership, Role, Tenant, User
+from .models import ApiKey, Membership, Role, Tenant, User
 from .security import decode_access_token
 
 
@@ -51,24 +53,44 @@ async def get_context(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     db: Annotated[AsyncSession, Depends(get_db)],
     x_tenant_id: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[str | None, Header()] = None,
 ) -> RequestContext:
-    if credentials is None:
+    token = x_api_key or (credentials.credentials if credentials else None)
+    if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="需要登录")
+    api_key_row = None
     try:
-        claims = decode_access_token(credentials.credentials)
+        claims = decode_access_token(token)
         user_id = str(claims["sub"])
         token_tenant = str(claims["tenant_id"])
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail="登录令牌无效或已过期") from exc
-    tenant_id = x_tenant_id or token_tenant
-    await set_tenant_context(db, tenant_id)
-    result = await db.execute(
-        select(User, Tenant, Membership)
-        .join(Membership, Membership.user_id == User.id)
-        .join(Tenant, Tenant.id == Membership.tenant_id)
-        .where(User.id == user_id, Tenant.id == tenant_id, User.is_active.is_(True), Tenant.is_active.is_(True))
-    )
-    row = result.first()
+        tenant_id = x_tenant_id or token_tenant
+        await set_tenant_context(db, tenant_id)
+        result = await db.execute(
+            select(User, Tenant, Membership)
+            .join(Membership, Membership.user_id == User.id)
+            .join(Tenant, Tenant.id == Membership.tenant_id)
+            .where(User.id == user_id, Tenant.id == tenant_id, User.is_active.is_(True), Tenant.is_active.is_(True))
+        )
+        row = result.first()
+    except Exception:
+        key_hash = hashlib.sha256(token.encode()).hexdigest()
+        result = await db.execute(
+            select(User, Tenant, Membership, ApiKey)
+            .join(ApiKey, ApiKey.user_id == User.id)
+            .join(Membership, (Membership.user_id == User.id) & (Membership.tenant_id == ApiKey.tenant_id))
+            .join(Tenant, Tenant.id == ApiKey.tenant_id)
+            .where(ApiKey.key_hash == key_hash, ApiKey.enabled.is_(True), User.is_active.is_(True), Tenant.is_active.is_(True))
+        )
+        api_key_row = result.first()
+        if not api_key_row:
+            raise HTTPException(status_code=401, detail="登录令牌无效或已过期")
+        row = api_key_row[:3]
+        tenant_id = row[1].id
+        if api_key_row[3].expires_at and api_key_row[3].expires_at < datetime.now(timezone.utc):
+            raise HTTPException(status_code=401, detail="API Key 已过期")
+        api_key_row[3].last_used_at = datetime.now(timezone.utc)
+        await db.commit()
+        await set_tenant_context(db, tenant_id)
     if not row:
         raise HTTPException(status_code=403, detail="用户不属于该租户")
     custom_permissions: tuple[str, ...] = ()
@@ -76,6 +98,8 @@ async def get_context(
         role = await db.scalar(select(Role).where(Role.id == row[2].custom_role_id, Role.tenant_id == tenant_id))
         if role:
             custom_permissions = tuple(role.permissions_json or [])
+    if api_key_row:
+        custom_permissions = (*custom_permissions, *(f"api:{scope}" for scope in (api_key_row[3].scopes_json or [])))
     return RequestContext(user=row[0], tenant=row[1], membership=row[2], custom_permissions=custom_permissions)
 
 

@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 import httpx
 import asyncpg
+import asyncmy
 import jwt
 from pypdf import PdfReader
 from docx import Document as DocxDocument
@@ -1448,6 +1449,13 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
     return {"agent_id": agent.id, "event_id": event.id, "text": result["text"], "usage": result.get("usage", {})}
 
 
+@app.post("/api/v1/agents/{agent_id}/chat")
+async def public_chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
+    """API Key/JWT 对外 Agent 调用入口，复用内部租户和安全策略。"""
+    require_api_scope(ctx, "agent:invoke")
+    return await chat_agent(agent_id, body, ctx, db)
+
+
 @app.post("/api/agents/{agent_id}/events/{event_id}/feedback")
 async def agent_feedback(agent_id: str, event_id: str, body: AgentFeedbackCreate, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
     event = await db.scalar(select(AgentEvent).where(AgentEvent.id == event_id, AgentEvent.agent_id == agent_id, AgentEvent.tenant_id == ctx.tenant_id))
@@ -1795,8 +1803,22 @@ async def run_workflow(workflow_id: str, body: WorkflowRunRequest, ctx: Operator
     return {"run_id": run.id, "status": run.status, "workflow_id": workflow.id, "version": version_number}
 
 
+@app.post("/api/v1/workflows/{workflow_id}/run")
+async def public_run_workflow(workflow_id: str, body: WorkflowRunRequest, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
+    """API Key/JWT 对外 Workflow 调用入口。"""
+    require_api_scope(ctx, "workflow:run")
+    return await run_workflow(workflow_id, body, ctx, db)
+
+
 def workflow_webhook_token(workflow_id: str) -> str:
     return hashlib.sha256(f"{get_settings().app_secret_key}:{workflow_id}".encode()).hexdigest()
+
+
+def require_api_scope(ctx: RequestContext, scope: str) -> None:
+    """JWT 管理调用不受 API Key scope 限制；API Key 必须显式声明调用范围。"""
+    api_scopes = {item[4:] for item in ctx.custom_permissions if item.startswith("api:")}
+    if api_scopes and scope not in api_scopes:
+        raise HTTPException(status_code=403, detail=f"API Key 缺少权限: {scope}")
 
 
 @app.get("/api/workflows/{workflow_id}/webhook-token")
@@ -2535,6 +2557,15 @@ async def list_databases(ctx: Context, db: AsyncSession = Depends(get_db)):
     return [{"id": row.id, "name": row.name, "db_type": row.db_type, "host": row.host, "port": row.port, "database_name": row.database_name, "username": row.username, "status": row.status, "schema": row.schema_json, "workspace_id": row.workspace_id, "created_at": row.created_at} for row in rows]
 
 
+async def open_database_connection(row: DatabaseConnection):
+    password = decrypt_secret(row.password_encrypted)
+    if row.db_type == "postgresql":
+        return await asyncpg.connect(host=row.host, port=row.port, user=row.username, password=password, database=row.database_name, timeout=8, command_timeout=8)
+    if row.db_type == "mysql":
+        return await asyncmy.connect(host=row.host, port=row.port, user=row.username, password=password, db=row.database_name, connect_timeout=8, autocommit=True)
+    raise RuntimeError(f"未安装或未支持数据库驱动: {row.db_type}")
+
+
 @app.post("/api/databases")
 async def create_database(body: DatabaseCreate, ctx: AdminContext, db: AsyncSession = Depends(get_db)):
     row = DatabaseConnection(tenant_id=ctx.tenant_id, workspace_id=body.workspace_id, name=body.name, db_type=body.db_type, host=body.host, port=body.port, database_name=body.database_name, username=body.username, password_encrypted=encrypt_secret(body.password), status="configured", created_by=ctx.user_id)
@@ -2552,11 +2583,11 @@ async def test_database(database_id: str, ctx: AdminContext, db: AsyncSession = 
         raise HTTPException(status_code=404, detail="数据库连接不存在")
     row.status = "incomplete"
     detail = "请补充数据库主机"
-    if row.host and row.db_type == "postgresql":
+    if row.host and row.db_type in {"postgresql", "mysql"}:
         try:
-            connection = await asyncpg.connect(host=row.host, port=row.port, user=row.username, password=decrypt_secret(row.password_encrypted), database=row.database_name, timeout=5, command_timeout=5)
+            connection = await open_database_connection(row)
             await connection.close()
-            row.status, detail = "healthy", "PostgreSQL 连接成功"
+            row.status, detail = "healthy", f"{row.db_type} 连接成功"
         except Exception as exc:
             row.status, detail = "unhealthy", f"连接失败：{type(exc).__name__}"
     elif row.host:
@@ -2580,18 +2611,27 @@ async def sync_database_schema(database_id: str, ctx: AdminContext, db: AsyncSes
     row = await db.scalar(select(DatabaseConnection).where(DatabaseConnection.id == database_id, DatabaseConnection.tenant_id == ctx.tenant_id))
     if not row:
         raise HTTPException(status_code=404, detail="数据库连接不存在")
-    if row.db_type != "postgresql":
-        raise HTTPException(status_code=422, detail="当前镜像的 schema 同步支持 PostgreSQL；其他数据库需安装对应驱动")
+    if row.db_type not in {"postgresql", "mysql"}:
+        raise HTTPException(status_code=422, detail="当前版本支持 PostgreSQL 和 MySQL schema 同步")
     if not row.host:
         raise HTTPException(status_code=422, detail="请先配置数据库主机")
     connection = None
     try:
-        connection = await asyncpg.connect(host=row.host, port=row.port, user=row.username, password=decrypt_secret(row.password_encrypted), database=row.database_name, timeout=8, command_timeout=8)
-        table_rows = await connection.fetch("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name")
+        connection = await open_database_connection(row)
         tables = []
-        for table in table_rows[:500]:
-            column_rows = await connection.fetch("SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position", table["table_name"])
-            tables.append({"name": table["table_name"], "type": table["table_type"], "columns": [{"name": item["column_name"], "type": item["data_type"], "nullable": item["is_nullable"] == "YES"} for item in column_rows]})
+        if row.db_type == "postgresql":
+            table_rows = await connection.fetch("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name")
+            for table in table_rows[:500]:
+                column_rows = await connection.fetch("SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position", table["table_name"])
+                tables.append({"name": table["table_name"], "type": table["table_type"], "columns": [{"name": item["column_name"], "type": item["data_type"], "nullable": item["is_nullable"] == "YES"} for item in column_rows]})
+        else:
+            async with connection.cursor(asyncmy.DictCursor) as cursor:
+                await cursor.execute("SELECT TABLE_NAME AS table_name, TABLE_TYPE AS table_type FROM information_schema.tables WHERE table_schema = %s ORDER BY table_name", (row.database_name,))
+                table_rows = await cursor.fetchall()
+                for table in table_rows[:500]:
+                    await cursor.execute("SELECT COLUMN_NAME AS column_name, DATA_TYPE AS data_type, IS_NULLABLE AS is_nullable FROM information_schema.columns WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position", (row.database_name, table["table_name"]))
+                    column_rows = await cursor.fetchall()
+                    tables.append({"name": table["table_name"], "type": table["table_type"], "columns": [{"name": item["column_name"], "type": item["data_type"], "nullable": item["is_nullable"] == "YES"} for item in column_rows]})
         row.schema_json = {"tables": tables, "synced_at": utcnow().isoformat()}
         row.status = "healthy"
     except Exception as exc:
@@ -2613,19 +2653,27 @@ async def query_database(database_id: str, body: DatabaseQuery, ctx: OperatorCon
     normalized = body.sql.strip().lower()
     if not (normalized.startswith("select") or normalized.startswith("with")):
         raise HTTPException(status_code=422, detail="数据库问答只允许只读查询")
-    if row.db_type != "postgresql":
-        raise HTTPException(status_code=422, detail="当前版本的实时连接器支持 PostgreSQL；MySQL/SQL Server 请安装对应驱动后接入")
+    if row.db_type not in {"postgresql", "mysql"}:
+        raise HTTPException(status_code=422, detail="当前版本的实时连接器支持 PostgreSQL 和 MySQL")
     if ";" in body.sql or "--" in body.sql or "/*" in body.sql or "*/" in body.sql:
         raise HTTPException(status_code=422, detail="数据库问答不允许多语句或 SQL 注释")
     sql = body.sql.strip()
     if " limit " not in f" {sql.lower()} ":
         sql = f"{sql.rstrip()} LIMIT 100"
     try:
-        connection = await asyncpg.connect(host=row.host, port=row.port, user=row.username, password=decrypt_secret(row.password_encrypted), database=row.database_name, timeout=8, command_timeout=8)
-        await connection.execute("SET statement_timeout = '8000ms'")
-        records = await connection.fetch(sql)
-        columns = list(records[0].keys()) if records else []
-        result_rows = [{key: (value.isoformat() if isinstance(value, datetime) else value if value is None or isinstance(value, (str, int, float, bool)) else str(value)) for key, value in record.items()} for record in records]
+        connection = await open_database_connection(row)
+        if row.db_type == "postgresql":
+            await connection.execute("SET statement_timeout = '8000ms'")
+            records = await connection.fetch(sql)
+            columns = list(records[0].keys()) if records else []
+            result_rows = [{key: (value.isoformat() if isinstance(value, datetime) else value if value is None or isinstance(value, (str, int, float, bool)) else str(value)) for key, value in record.items()} for record in records]
+        else:
+            async with connection.cursor(asyncmy.DictCursor) as cursor:
+                await cursor.execute("SET SESSION MAX_EXECUTION_TIME=8000")
+                await cursor.execute(sql)
+                records = await cursor.fetchall()
+                columns = [item[0] for item in cursor.description] if cursor.description else []
+                result_rows = [{key: (value.isoformat() if isinstance(value, datetime) else value if value is None or isinstance(value, (str, int, float, bool)) else str(value)) for key, value in record.items()} for record in records]
         await connection.close()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"数据库查询失败：{type(exc).__name__}") from exc
@@ -2812,3 +2860,30 @@ async def admin_analytics_summary(ctx: AdminContext, db: AsyncSession = Depends(
     usage = (await db.execute(select(func.coalesce(func.sum(ComputeUsage.tokens), 0), func.coalesce(func.sum(ComputeUsage.cpu_milliseconds), 0), func.coalesce(func.sum(ComputeUsage.gpu_seconds), 0)).where(ComputeUsage.tenant_id == ctx.tenant_id))).one()
     values["usage"] = {"tokens": int(usage[0]), "cpu_milliseconds": int(usage[1]), "gpu_seconds": int(usage[2])}
     return values
+
+
+@app.get("/api/admin/analytics/series")
+async def admin_analytics_series(ctx: AdminContext, db: AsyncSession = Depends(get_db), days: int = 30):
+    days = max(1, min(days, 180))
+    since = utcnow() - timedelta(days=days - 1)
+    events = (await db.execute(select(AgentEvent).where(AgentEvent.tenant_id == ctx.tenant_id, AgentEvent.created_at >= since).order_by(AgentEvent.created_at))).scalars().all()
+    buckets = {}
+    for offset in range(days):
+        key = (since + timedelta(days=offset)).date().isoformat()
+        buckets[key] = {"date": key, "messages": 0, "tokens": 0, "latency_ms": 0, "positive": 0, "negative": 0}
+    for event in events:
+        key = event.created_at.date().isoformat()
+        bucket = buckets.get(key)
+        if not bucket:
+            continue
+        bucket["messages"] += 1
+        bucket["tokens"] += int(event.tokens or 0)
+        bucket["latency_ms"] += int(event.latency_ms or 0)
+        if event.feedback == "positive":
+            bucket["positive"] += 1
+        elif event.feedback == "negative":
+            bucket["negative"] += 1
+    for bucket in buckets.values():
+        bucket["avg_latency_ms"] = round(bucket["latency_ms"] / bucket["messages"], 2) if bucket["messages"] else 0
+        del bucket["latency_ms"]
+    return {"days": days, "series": list(buckets.values())}

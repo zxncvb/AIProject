@@ -174,6 +174,8 @@ OIDC_GROUP_ROLE_MAP={"ai-admin":"admin","ai-developer":"developer","ai-operator"
 - 生产治理：发布渠道绑定、审批中心、组织/工作区、平台统计、SCIM、FinOps、审计。
 - 生命周期：Agent 导入/导出/复制/删除、资源编排、触发器、反馈统计；工作流版本、图校验、生产发布、灰度记录和定时调度。
 - 创建与管理：Agent 创建支持类型、工作空间、模型、知识库绑定；平台管理页已接入安全策略、身份状态、计费预算和干预规则。
+- 对外调用：API Key 支持 Bearer/X-API-Key 鉴权、scope 校验和撤销；对外 Agent 调用为 `/api/v1/agents/{agent_id}/chat`，Workflow 调用为 `/api/v1/workflows/{workflow_id}/run`。
+- 数据库连接器：PostgreSQL 与 MySQL 支持连接测试、schema 同步和只读查询；SQL Server/Oracle 仍需安装并接入对应驱动。
 - 知识扩展：问答库、术语库、图谱库、数据源资源 CRUD；数据库详情、PostgreSQL 表结构同步和只读查询结果。
 - 市场与账号：市场资源详情/安装/收藏、插件/Skill/MCP Debug、个人 API Key 创建与撤销。
 
