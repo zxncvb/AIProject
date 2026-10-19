@@ -1,7 +1,7 @@
 import pytest
 from fastapi import HTTPException
 
-from app.main import validate_extension_manifest, validate_knowledge_asset
+from app.main import bind_database_parameters, validate_extension_manifest, validate_knowledge_asset
 
 
 def test_extension_manifest_rejects_capability_outside_allowlist():
@@ -18,3 +18,12 @@ def test_knowledge_asset_requires_typed_content():
 
 def test_knowledge_asset_accepts_graph_shape():
     validate_knowledge_asset("graph", {"nodes": [], "edges": []})
+
+
+def test_database_parameters_are_bound_for_each_driver_style():
+    sql, params = bind_database_parameters("SELECT * FROM orders WHERE id = :order_id", "postgresql", {"order_id": 7})
+    assert sql.endswith("id = $1")
+    assert params == (7,)
+    sql, params = bind_database_parameters("SELECT * FROM orders WHERE id = :order_id", "oracle", {"order_id": 7})
+    assert sql.endswith("id = :order_id")
+    assert params == {"order_id": 7}

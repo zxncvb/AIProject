@@ -349,7 +349,7 @@ class PromptTemplateCreate(BaseModel):
 
 class DatabaseCreate(BaseModel):
     name: str = Field(min_length=2, max_length=160)
-    db_type: str = Field(default="postgresql", max_length=40)
+    db_type: str = Field(default="postgresql", pattern=r"^(postgresql|mysql|sqlserver|oracle)$")
     host: str = ""
     port: int = Field(default=5432, ge=1, le=65535)
     database_name: str = ""

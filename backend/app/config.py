@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     alert_dingtalk_webhook_url: str = ""
     alert_feishu_webhook_url: str = ""
     alert_wecom_webhook_url: str = ""
+    sqlserver_odbc_driver: str = "ODBC Driver 18 for SQL Server"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 

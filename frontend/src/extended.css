@@ -6,3 +6,4 @@
 aside{overflow-y:auto}aside::-webkit-scrollbar{width:6px}aside::-webkit-scrollbar-thumb{background:#3c70aa;border-radius:6px}
 @media(max-width:1100px){.three-col{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.three-col{grid-template-columns:1fr}}
+.trend-list{display:grid;gap:8px}.trend-row{display:grid;grid-template-columns:70px repeat(3,1fr);gap:10px;padding:9px 10px;border:1px solid #e1e8f0;border-radius:8px;background:#fbfdff;color:#5e7188;font-size:12px}.trend-row b{color:#1e426b}.trend-row span{text-align:right}

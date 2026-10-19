@@ -685,6 +685,9 @@ OIDC_ALLOWED_DOMAINS=example.com
 - `/api/finops/summary`：Token、CPU、GPU 和估算成本
 - `/public/apps/{tenant_slug}/{app_slug}/invoke`：低代码应用公开调用和工作流排队
 - `/api/admin/identity/status`：OIDC/LDAP 接入状态
+- `/api/finops/budget`：月度预算配置，Agent/Workflow/公开应用任务创建前强制预算检查
+- `/api/publish/bindings/{binding_id}/publish`：审批校验、白名单 webhook 渠道投递和发布状态落库
+- `/api/databases/{database_id}/query`：四类数据库的只读查询、命名参数绑定和最多 100 行限制
 
 部署包新增：
 
@@ -756,6 +759,7 @@ Get-Content -Raw -Encoding utf8 deploy/postgres/rls.sql |
 - Agent 和 Workflow 对外接口支持 `Authorization: Bearer eai_...` 或 `X-API-Key`，并继续执行租户、角色、预算和安全策略校验。
 - 知识库上传按 SHA-256 内容指纹去重；问答、术语、图谱、数据源资产会在写入前检查必需字段和数据类型。
 - Skill、插件和 MCP manifest 统一经过扩展能力白名单校验，插件仍需审批后才能运行。
+- 预算超限会在 Agent、Workflow 和公开应用入口统一返回 429；平台管理页展示最近 30 天消息、Token 和平均延迟趋势，运行记录支持 JSON 导出。
 - PostgreSQL 与 MySQL 已支持连接测试、schema 同步和只读查询；SQL Server/Oracle 需要在企业镜像中接入对应驱动。
 - 回归结果：Docker backend/worker 构建成功，pytest `8 passed`，`/healthz` 与 `/readyz` 正常。
 
@@ -785,6 +789,6 @@ docker compose exec -T backend alembic upgrade head
 
 结合 `hiagent-ui-tour/screenshots` 的 135 张界面参考图，本轮完成了中文蓝白控制台的主要产品闭环：模型体验/模型广场、Agent 编排、数据库入口、提示词模板、快速对话、探索市场、发布渠道、审批中心、平台统计、账号中心和安全中心。前端入口均已连接后端 API，不再是静态演示数据。
 
-新增后端资源包括组织与工作区、Agent 配置/版本/事件/API Key、提示词模板、数据库连接与 schema 快照、知识扩展资源、市场资源、收藏、发布渠道与绑定、审批申请、干预规则等。Agent 已覆盖导入、导出、复制、删除、资源编排、触发器和反馈统计；数据库问答已支持 PostgreSQL 的只读实时查询与表结构同步；MySQL/SQL Server 仍需在企业镜像中安装对应驱动后启用。
+新增后端资源包括组织与工作区、Agent 配置/版本/事件/API Key、提示词模板、数据库连接与 schema 快照、知识扩展资源、市场资源、收藏、发布渠道与绑定、审批申请、干预规则等。Agent 已覆盖导入、导出、复制、删除、资源编排、触发器和反馈统计；数据库问答已支持 PostgreSQL、MySQL、SQL Server、Oracle 的只读实时查询与表结构同步，其中 SQL Server 需要在企业镜像中安装 Microsoft ODBC Driver。
 
 验收结果：前端 Vite 构建通过；后端 pytest `5 passed`；登录、工作区、模型目录、提示词、数据库、市场、发布绑定、审批、安全、FinOps 等接口均返回 HTTP 200；Docker Compose 中前后端、Worker、PostgreSQL、Redis、Qdrant、Prometheus、Grafana 等服务正常运行。

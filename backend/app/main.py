@@ -4,6 +4,7 @@ import hmac
 import io
 import json
 import logging
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -16,6 +17,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 import httpx
 import asyncpg
 import asyncmy
+import aioodbc
+import oracledb
 import jwt
 from pypdf import PdfReader
 from docx import Document as DocxDocument
@@ -206,6 +209,30 @@ async def tenant_policy(db: AsyncSession, tenant_id: str) -> TenantPolicy:
     return row
 
 
+async def enforce_monthly_budget(db: AsyncSession, tenant_id: str) -> None:
+    """Block new work once the tenant's configured monthly cost budget is exceeded."""
+    policy = await tenant_policy(db, tenant_id)
+    pricing = policy.pricing_json or {}
+    budget = float(pricing.get("monthly_budget", 0) or 0)
+    if budget <= 0:
+        return
+    current = utcnow()
+    month_start = datetime(current.year, current.month, 1, tzinfo=timezone.utc)
+    usage = (await db.execute(
+        select(
+            func.coalesce(func.sum(ComputeUsage.tokens), 0),
+            func.coalesce(func.sum(ComputeUsage.cpu_milliseconds), 0),
+            func.coalesce(func.sum(ComputeUsage.gpu_seconds), 0),
+        ).where(ComputeUsage.tenant_id == tenant_id, ComputeUsage.created_at >= month_start)
+    )).one()
+    token_cost = int(usage[0]) / 1000 * float(pricing.get("token_price_per_1k", get_settings().finops_token_price_per_1k))
+    cpu_cost = int(usage[1]) / 1000 * float(pricing.get("cpu_price_per_second", get_settings().finops_cpu_price_per_second))
+    gpu_cost = int(usage[2]) * float(pricing.get("gpu_price_per_second", get_settings().finops_gpu_price_per_second))
+    total = token_cost + cpu_cost + gpu_cost
+    if total >= budget:
+        raise HTTPException(status_code=429, detail={"code": "monthly_budget_exceeded", "message": "当前租户已超过月度预算，新的 AI 任务已被阻断", "budget": budget, "estimated_cost": round(total, 6)})
+
+
 def validate_extension_manifest(manifest: dict[str, Any]) -> None:
     if not isinstance(manifest, dict):
         raise HTTPException(status_code=422, detail="扩展 manifest 必须是 JSON 对象")
@@ -319,9 +346,9 @@ app.add_middleware(CORSMiddleware, allow_origins=get_settings().cors_origin_list
 @app.middleware("http")
 async def security_middleware(request, call_next):
     """Apply baseline browser security headers and Redis-backed API throttling."""
-    if request.url.path.startswith("/api/"):
+    if request.url.path.startswith("/api/") or request.url.path.startswith("/public/"):
         window = 60
-        limit = 20 if request.url.path.startswith("/api/auth/") else 300
+        limit = 20 if request.url.path.startswith("/api/auth/") else (120 if request.url.path.startswith("/public/") else 300)
         client_ip = request.client.host if request.client else "unknown"
         redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
         try:
@@ -1147,6 +1174,7 @@ async def invoke_public_application(
     workflow = await db.scalar(select(Workflow).where(Workflow.id == workflow_id, Workflow.tenant_id == tenant.id, Workflow.status == "published"))
     if not workflow or not workflow.published_version:
         raise HTTPException(status_code=422, detail="应用绑定的工作流尚未发布")
+    await enforce_monthly_budget(db, tenant.id)
     run = WorkflowRun(tenant_id=tenant.id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=workflow.published_version, input_json=body.input, trace_id="", created_by=row.created_by)
     db.add(run)
     await db.flush()
@@ -1233,7 +1261,10 @@ async def release_gpu_lease(lease_id: str, ctx: OperatorContext, db: AsyncSessio
 
 @app.get("/api/finops/summary")
 async def finops_summary(ctx: AdminContext, db: AsyncSession = Depends(get_db)):
-    usage = await get_compute_usage(ctx, db)
+    current = utcnow()
+    month_start = datetime(current.year, current.month, 1, tzinfo=timezone.utc)
+    row = (await db.execute(select(func.coalesce(func.sum(ComputeUsage.cpu_milliseconds), 0), func.coalesce(func.sum(ComputeUsage.memory_mb_seconds), 0), func.coalesce(func.sum(ComputeUsage.gpu_seconds), 0), func.coalesce(func.sum(ComputeUsage.tokens), 0)).where(ComputeUsage.tenant_id == ctx.tenant_id, ComputeUsage.created_at >= month_start))).one()
+    usage = {"tenant_id": ctx.tenant_id, "period": month_start.date().isoformat(), "cpu_milliseconds": int(row[0]), "memory_mb_seconds": int(row[1]), "gpu_seconds": int(row[2]), "tokens": int(row[3])}
     policy = await tenant_policy(db, ctx.tenant_id)
     pricing = policy.pricing_json or {}
     token_cost = usage["tokens"] / 1000 * float(pricing.get("token_price_per_1k", get_settings().finops_token_price_per_1k))
@@ -1456,6 +1487,7 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
     provider = (await db.execute(provider_stmt)).scalars().first()
     if not provider:
         raise HTTPException(status_code=422, detail="Agent 没有绑定可用模型提供商")
+    await enforce_monthly_budget(db, ctx.tenant_id)
     quota = await db.scalar(select(ComputeQuota).where(ComputeQuota.tenant_id == ctx.tenant_id))
     month_start = datetime(utcnow().year, utcnow().month, 1, tzinfo=timezone.utc)
     used_tokens = await db.scalar(select(func.coalesce(func.sum(ComputeUsage.tokens), 0)).where(ComputeUsage.tenant_id == ctx.tenant_id, ComputeUsage.created_at >= month_start)) or 0
@@ -1811,6 +1843,7 @@ async def run_workflow(workflow_id: str, body: WorkflowRunRequest, ctx: Operator
     workflow = await db.scalar(select(Workflow).where(Workflow.id == workflow_id, Workflow.tenant_id == ctx.tenant_id))
     if not workflow:
         raise HTTPException(status_code=404, detail="工作流不存在")
+    await enforce_monthly_budget(db, ctx.tenant_id)
     version_number = body.version or await select_release_version(db, workflow, body.environment, f"{ctx.user_id}:{workflow.id}") or workflow.published_version
     if not version_number:
         raise HTTPException(status_code=422, detail="工作流尚未发布")
@@ -2609,7 +2642,29 @@ async def open_database_connection(row: DatabaseConnection):
         return await asyncpg.connect(host=row.host, port=row.port, user=row.username, password=password, database=row.database_name, timeout=8, command_timeout=8)
     if row.db_type == "mysql":
         return await asyncmy.connect(host=row.host, port=row.port, user=row.username, password=password, db=row.database_name, connect_timeout=8, autocommit=True)
+    if row.db_type == "sqlserver":
+        driver = get_settings().sqlserver_odbc_driver
+        dsn = f"DRIVER={{{driver}}};SERVER={row.host},{row.port};DATABASE={row.database_name};UID={row.username};PWD={password};TrustServerCertificate=yes"
+        return await aioodbc.connect(dsn=dsn, timeout=8, autocommit=True)
+    if row.db_type == "oracle":
+        dsn = f"{row.host}:{row.port}/{row.database_name}"
+        return await oracledb.connect_async(user=row.username, password=password, dsn=dsn, tcp_connect_timeout=8)
     raise RuntimeError(f"未安装或未支持数据库驱动: {row.db_type}")
+
+
+def bind_database_parameters(sql: str, db_type: str, parameters: dict[str, Any]) -> tuple[str, Any]:
+    """Bind named parameters without interpolating values into SQL text."""
+    if not parameters:
+        return sql, {} if db_type == "oracle" else ()
+    names = list(dict.fromkeys(re.findall(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)", sql)))
+    missing = [name for name in names if name not in parameters]
+    if missing:
+        raise HTTPException(status_code=422, detail=f"缺少 SQL 参数: {', '.join(missing)}")
+    if db_type == "oracle":
+        return sql, {name: parameters[name] for name in names}
+    marker = "$" if db_type == "postgresql" else ("?" if db_type == "sqlserver" else "%s")
+    bound_sql = re.sub(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)", lambda match: f"{marker}{names.index(match.group(1)) + 1}" if marker == "$" else marker, sql)
+    return bound_sql, tuple(parameters[name] for name in names)
 
 
 @app.post("/api/databases")
@@ -2629,7 +2684,7 @@ async def test_database(database_id: str, ctx: AdminContext, db: AsyncSession = 
         raise HTTPException(status_code=404, detail="数据库连接不存在")
     row.status = "incomplete"
     detail = "请补充数据库主机"
-    if row.host and row.db_type in {"postgresql", "mysql"}:
+    if row.host and row.db_type in {"postgresql", "mysql", "sqlserver", "oracle"}:
         try:
             connection = await open_database_connection(row)
             await connection.close()
@@ -2637,7 +2692,7 @@ async def test_database(database_id: str, ctx: AdminContext, db: AsyncSession = 
         except Exception as exc:
             row.status, detail = "unhealthy", f"连接失败：{type(exc).__name__}"
     elif row.host:
-        row.status, detail = "configured", f"已登记 {row.db_type} 连接；当前镜像未安装该数据库驱动"
+        row.status, detail = "configured", "已登记数据库连接，等待配置主机"
     await audit(db, ctx, "database.test", "database", row.id, {"status": row.status})
     await db.commit()
     return {"id": row.id, "status": row.status, "detail": detail}
@@ -2657,8 +2712,8 @@ async def sync_database_schema(database_id: str, ctx: AdminContext, db: AsyncSes
     row = await db.scalar(select(DatabaseConnection).where(DatabaseConnection.id == database_id, DatabaseConnection.tenant_id == ctx.tenant_id))
     if not row:
         raise HTTPException(status_code=404, detail="数据库连接不存在")
-    if row.db_type not in {"postgresql", "mysql"}:
-        raise HTTPException(status_code=422, detail="当前版本支持 PostgreSQL 和 MySQL schema 同步")
+    if row.db_type not in {"postgresql", "mysql", "sqlserver", "oracle"}:
+        raise HTTPException(status_code=422, detail="当前版本支持 PostgreSQL、MySQL、SQL Server 和 Oracle schema 同步")
     if not row.host:
         raise HTTPException(status_code=422, detail="请先配置数据库主机")
     connection = None
@@ -2670,7 +2725,7 @@ async def sync_database_schema(database_id: str, ctx: AdminContext, db: AsyncSes
             for table in table_rows[:500]:
                 column_rows = await connection.fetch("SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position", table["table_name"])
                 tables.append({"name": table["table_name"], "type": table["table_type"], "columns": [{"name": item["column_name"], "type": item["data_type"], "nullable": item["is_nullable"] == "YES"} for item in column_rows]})
-        else:
+        elif row.db_type == "mysql":
             async with connection.cursor(asyncmy.DictCursor) as cursor:
                 await cursor.execute("SELECT TABLE_NAME AS table_name, TABLE_TYPE AS table_type FROM information_schema.tables WHERE table_schema = %s ORDER BY table_name", (row.database_name,))
                 table_rows = await cursor.fetchall()
@@ -2678,6 +2733,23 @@ async def sync_database_schema(database_id: str, ctx: AdminContext, db: AsyncSes
                     await cursor.execute("SELECT COLUMN_NAME AS column_name, DATA_TYPE AS data_type, IS_NULLABLE AS is_nullable FROM information_schema.columns WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position", (row.database_name, table["table_name"]))
                     column_rows = await cursor.fetchall()
                     tables.append({"name": table["table_name"], "type": table["table_type"], "columns": [{"name": item["column_name"], "type": item["data_type"], "nullable": item["is_nullable"] == "YES"} for item in column_rows]})
+        elif row.db_type == "sqlserver":
+            async with connection.cursor() as cursor:
+                await cursor.execute("SELECT TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name, TABLE_TYPE AS table_type FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_CATALOG = ? ORDER BY TABLE_SCHEMA, TABLE_NAME", (row.database_name,))
+                table_rows = await cursor.fetchall()
+                for table in table_rows[:500]:
+                    await cursor.execute("SELECT COLUMN_NAME AS column_name, DATA_TYPE AS data_type, IS_NULLABLE AS is_nullable FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_CATALOG = ? AND TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION", (row.database_name, table[0], table[1]))
+                    column_rows = await cursor.fetchall()
+                    tables.append({"name": f"{table[0]}.{table[1]}", "type": table[2], "columns": [{"name": item[0], "type": item[1], "nullable": item[2] == "YES"} for item in column_rows]})
+        else:
+            async with connection.cursor() as cursor:
+                await cursor.execute("SELECT table_name, 'BASE TABLE' AS table_type FROM user_tables ORDER BY table_name")
+                table_rows = await cursor.fetchall()
+                for table in table_rows[:500]:
+                    table_name = table[0]
+                    await cursor.execute("SELECT column_name, data_type, nullable FROM user_tab_columns WHERE table_name = :1 ORDER BY column_id", [table_name])
+                    column_rows = await cursor.fetchall()
+                    tables.append({"name": table_name, "type": table[1], "columns": [{"name": item[0], "type": item[1], "nullable": item[2] == "Y"} for item in column_rows]})
         row.schema_json = {"tables": tables, "synced_at": utcnow().isoformat()}
         row.status = "healthy"
     except Exception as exc:
@@ -2699,27 +2771,47 @@ async def query_database(database_id: str, body: DatabaseQuery, ctx: OperatorCon
     normalized = body.sql.strip().lower()
     if not (normalized.startswith("select") or normalized.startswith("with")):
         raise HTTPException(status_code=422, detail="数据库问答只允许只读查询")
-    if row.db_type not in {"postgresql", "mysql"}:
-        raise HTTPException(status_code=422, detail="当前版本的实时连接器支持 PostgreSQL 和 MySQL")
+    if row.db_type not in {"postgresql", "mysql", "sqlserver", "oracle"}:
+        raise HTTPException(status_code=422, detail="当前版本的实时连接器支持 PostgreSQL、MySQL、SQL Server 和 Oracle")
     if ";" in body.sql or "--" in body.sql or "/*" in body.sql or "*/" in body.sql:
         raise HTTPException(status_code=422, detail="数据库问答不允许多语句或 SQL 注释")
+    if re.search(r"\b(insert|update|delete|alter|drop|truncate|create|grant|revoke|merge|call|execute)\b", normalized):
+        raise HTTPException(status_code=422, detail="数据库问答仅允许只读查询")
     sql = body.sql.strip()
-    if " limit " not in f" {sql.lower()} ":
+    if row.db_type in {"postgresql", "mysql"} and " limit " not in f" {sql.lower()} ":
         sql = f"{sql.rstrip()} LIMIT 100"
+    elif row.db_type == "sqlserver" and "top " not in sql.lower():
+        sql = re.sub(r"\bselect\b", "SELECT TOP 100", sql, count=1, flags=re.IGNORECASE)
+    elif row.db_type == "oracle" and "fetch first" not in sql.lower():
+        sql = f"{sql.rstrip()} FETCH FIRST 100 ROWS ONLY"
+    bound_sql, bound_params = bind_database_parameters(sql, row.db_type, body.parameters)
     try:
         connection = await open_database_connection(row)
         if row.db_type == "postgresql":
             await connection.execute("SET statement_timeout = '8000ms'")
-            records = await connection.fetch(sql)
+            records = await connection.fetch(bound_sql, *bound_params)
             columns = list(records[0].keys()) if records else []
             result_rows = [{key: (value.isoformat() if isinstance(value, datetime) else value if value is None or isinstance(value, (str, int, float, bool)) else str(value)) for key, value in record.items()} for record in records]
-        else:
+        elif row.db_type == "mysql":
             async with connection.cursor(asyncmy.DictCursor) as cursor:
                 await cursor.execute("SET SESSION MAX_EXECUTION_TIME=8000")
-                await cursor.execute(sql)
+                await cursor.execute(bound_sql, bound_params)
                 records = await cursor.fetchall()
                 columns = [item[0] for item in cursor.description] if cursor.description else []
                 result_rows = [{key: (value.isoformat() if isinstance(value, datetime) else value if value is None or isinstance(value, (str, int, float, bool)) else str(value)) for key, value in record.items()} for record in records]
+        elif row.db_type == "sqlserver":
+            async with connection.cursor() as cursor:
+                await cursor.execute("SET LOCK_TIMEOUT 8000")
+                await cursor.execute(bound_sql, bound_params)
+                records = await cursor.fetchmany(100)
+                columns = [item[0] for item in cursor.description] if cursor.description else []
+                result_rows = [{columns[index]: (value.isoformat() if isinstance(value, datetime) else value if value is None or isinstance(value, (str, int, float, bool)) else str(value)) for index, value in enumerate(record)} for record in records]
+        else:
+            async with connection.cursor() as cursor:
+                await cursor.execute(bound_sql, bound_params)
+                records = await cursor.fetchmany(100)
+                columns = [item[0] for item in cursor.description] if cursor.description else []
+                result_rows = [{columns[index]: (value.isoformat() if isinstance(value, datetime) else value if value is None or isinstance(value, (str, int, float, bool)) else str(value)) for index, value in enumerate(record)} for record in records]
         await connection.close()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"数据库查询失败：{type(exc).__name__}") from exc
@@ -2827,6 +2919,10 @@ async def create_publish_binding(body: PublishBindingCreate, ctx: EditorContext,
     channel = await db.scalar(select(PublishChannel).where(PublishChannel.id == body.channel_id, PublishChannel.tenant_id == ctx.tenant_id, PublishChannel.enabled.is_(True)))
     if not channel:
         raise HTTPException(status_code=404, detail="发布渠道不存在或已停用")
+    resource_models = {"agent": Agent, "workflow": Workflow, "application": Application}
+    resource = await db.scalar(select(resource_models[body.resource_type]).where(resource_models[body.resource_type].id == body.resource_id, resource_models[body.resource_type].tenant_id == ctx.tenant_id))
+    if not resource:
+        raise HTTPException(status_code=404, detail="待发布资源不存在或不属于当前租户")
     row = PublishBinding(tenant_id=ctx.tenant_id, resource_type=body.resource_type, resource_id=body.resource_id, channel_id=body.channel_id, version=body.version, config_json=body.config, created_by=ctx.user_id)
     db.add(row)
     try:
@@ -2841,9 +2937,37 @@ async def create_publish_binding(body: PublishBindingCreate, ctx: EditorContext,
 
 @app.post("/api/publish/bindings/{binding_id}/publish")
 async def publish_binding(binding_id: str, ctx: EditorContext, db: AsyncSession = Depends(get_db)):
-    row = await db.scalar(select(PublishBinding).where(PublishBinding.id == binding_id, PublishBinding.tenant_id == ctx.tenant_id))
-    if not row:
+    result = await db.execute(
+        select(PublishBinding, PublishChannel)
+        .join(PublishChannel, PublishChannel.id == PublishBinding.channel_id)
+        .where(PublishBinding.id == binding_id, PublishBinding.tenant_id == ctx.tenant_id)
+    )
+    pair = result.first()
+    if not pair:
         raise HTTPException(status_code=404, detail="发布绑定不存在")
+    row, channel = pair
+    if not channel.enabled:
+        raise HTTPException(status_code=409, detail="发布渠道已停用")
+    if channel.approval_required:
+        approved = await db.scalar(select(ApprovalRequestModel).where(ApprovalRequestModel.tenant_id == ctx.tenant_id, ApprovalRequestModel.request_type == "channel.publish", ApprovalRequestModel.resource_id == row.id, ApprovalRequestModel.status == "approved"))
+        if not approved:
+            raise HTTPException(status_code=409, detail="该发布渠道需要先完成审批")
+    delivery = {**(channel.config_json or {}), **(row.config_json or {})}
+    webhook_url = str(delivery.get("webhook_url") or "")
+    if channel.code in {"feishu", "wecom", "wechat", "dingtalk", "a2a"}:
+        if not webhook_url:
+            raise HTTPException(status_code=422, detail=f"渠道 {channel.code} 缺少 webhook_url 配置")
+        from urllib.parse import urlparse
+        parsed = urlparse(webhook_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.hostname.lower() not in get_settings().allowed_hosts:
+            raise HTTPException(status_code=422, detail="发布渠道地址不在 HTTP 白名单中")
+        payload = {"event": "resource.published", "resource_type": row.resource_type, "resource_id": row.resource_id, "version": row.version, "tenant_id": ctx.tenant_id, "channel": channel.code}
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.post(webhook_url, json=payload)
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"发布渠道调用失败: {type(exc).__name__}") from exc
     row.status = "published"
     row.published_at = utcnow()
     await audit(db, ctx, "publish.binding.publish", "publish_binding", row.id, {"version": row.version})

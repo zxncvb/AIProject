@@ -175,11 +175,13 @@ OIDC_GROUP_ROLE_MAP={"ai-admin":"admin","ai-developer":"developer","ai-operator"
 - 生命周期：Agent 导入/导出/复制/删除、资源编排、触发器、反馈统计；工作流版本、图校验、生产发布、灰度记录和定时调度。
 - 创建与管理：Agent 创建支持类型、工作空间、模型、知识库绑定；平台管理页已接入安全策略、身份状态、计费预算和干预规则。
 - 对外调用：API Key 支持 Bearer/X-API-Key 鉴权、过期时间、撤销和严格 scope 校验；当前可申请 `agent:invoke`、`workflow:run`，对外 Agent 调用为 `/api/v1/agents/{agent_id}/chat`，Workflow 调用为 `/api/v1/workflows/{workflow_id}/run`。
-- 数据库连接器：PostgreSQL 与 MySQL 支持连接测试、schema 同步和只读查询；SQL Server/Oracle 仍需安装并接入对应驱动。
+- 预算治理：配置月度预算后，Agent、Workflow 和公开应用在创建新任务前会检查当月 Token/CPU/GPU 成本，超过预算返回 429 并阻断新任务。
+- 数据库连接器：PostgreSQL、MySQL、SQL Server 和 Oracle 均提供连接测试、schema 同步和只读查询入口；SQL Server 需要企业镜像安装 Microsoft ODBC Driver，Oracle 使用 python-oracledb Thin 模式。
 - 知识扩展：问答库、术语库、图谱库、数据源资源 CRUD；创建时按资产类型校验结构、同一知识库拦截重复文档；数据库详情、PostgreSQL/MySQL 表结构同步和只读查询结果。
 - 市场与账号：市场资源详情/安装/收藏、插件/Skill/MCP Debug、个人 API Key 创建与撤销。
+- 发布渠道：API/Web/WebSDK 使用平台内置发布记录；飞书、企业微信、微信公众号、钉钉和 A2A 支持白名单 webhook 投递，审批渠道必须先获得 `channel.publish` 审批。
 
 登录账号和密码由 `.env` 中的 `BOOTSTRAP_ADMIN_EMAIL`、`BOOTSTRAP_ADMIN_PASSWORD` 注入；仓库不保存任何登录密码或密钥。
 
-数据库问答接口支持 PostgreSQL 只读实时查询，强制单语句、自动最多 100 行和 8 秒超时；MySQL/SQL Server 还需在企业镜像中安装对应驱动。生产环境仍需配置数据库审批、网络白名单、字段脱敏和结果权限策略。
+数据库问答接口支持 PostgreSQL、MySQL、SQL Server、Oracle 只读实时查询，强制单语句、自动最多 100 行和 8 秒级超时；生产环境仍需配置数据库审批、网络白名单、字段脱敏和结果权限策略。
 
