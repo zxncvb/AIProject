@@ -8,6 +8,10 @@
 
 ## 2. 当前总体架构
 
+![企业 AI 中台总体架构](docs/images/enterprise-ai-platform-architecture.png)
+
+PNG 原图为 1672 × 941，可直接用于领导汇报、方案评审和项目文档；下方 Mermaid 图保留为可编辑版本。
+
 ```mermaid
 flowchart TB
     U[企业用户 / 管理员 / 外部身份系统]
