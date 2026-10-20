@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: application-registry-auth
+  namespace: enterprise-ai-apps
+type: kubernetes.io/dockerconfigjson
+stringData:
+  .dockerconfigjson: '{"auths":{"ghcr.io":{"username":"replace","password":"replace","auth":"base64-user-colon-token"}}}'

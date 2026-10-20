@@ -79,3 +79,12 @@ async def delete_document_vectors(tenant_id: str, kb_id: str, document_id: str) 
         response = await client.post(f"{settings.qdrant_url.rstrip('/')}/collections/{name}/points/delete?wait=true", json={"filter": {"must": [{"key": "document_id", "match": {"value": document_id}}]}})
         if response.status_code not in {200, 404}:
             response.raise_for_status()
+
+
+async def delete_knowledge_collection(tenant_id: str, kb_id: str) -> None:
+    settings = get_settings()
+    name = collection_name(tenant_id, kb_id)
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.delete(f"{settings.qdrant_url.rstrip('/')}/collections/{name}")
+        if response.status_code not in {200, 404}:
+            response.raise_for_status()

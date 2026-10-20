@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: application-controller
+  namespace: enterprise-ai
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: application-controller
+  namespace: enterprise-ai-apps
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete", "update"]
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete", "update"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: application-controller
+  namespace: enterprise-ai-apps
+subjects:
+  - kind: ServiceAccount
+    name: application-controller
+    namespace: enterprise-ai
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: application-controller
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: application-controller
+  namespace: enterprise-ai
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: application-controller}
+  template:
+    metadata:
+      labels: {app: application-controller}
+    spec:
+      serviceAccountName: application-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: controller
+          image: enterprise-ai-platform/backend:latest
+          command: ["python", "-m", "app.application_controller"]
+          envFrom:
+            - secretRef: {name: enterprise-ai-secrets}
+          env:
+            - {name: APPLICATION_RUNTIME_NAMESPACE, value: enterprise-ai-apps}
+          resources:
+            requests: {cpu: "100m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "512Mi"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 128Mi}

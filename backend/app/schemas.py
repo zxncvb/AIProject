@@ -1,7 +1,14 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def reject_corrupted_label(value: str) -> str:
+    value = value.strip()
+    if "�" in value or "???" in value or any(marker in value for marker in ("锟", "浼佷笟", "绠＄悊")):
+        raise ValueError("显示名称包含乱码，请使用 UTF-8 重新提交")
+    return value
 
 
 class LoginRequest(BaseModel):
@@ -35,6 +42,8 @@ class ScimUserCreate(BaseModel):
     active: bool = True
     roles: list[dict[str, Any]] = Field(default_factory=list)
 
+    _validate_display_name = field_validator("displayName")(reject_corrupted_label)
+
 
 class ScimUserPatch(BaseModel):
     Operations: list[dict[str, Any]] = Field(default_factory=list)
@@ -67,6 +76,8 @@ class MemberCreate(BaseModel):
     password: str = Field(min_length=12, max_length=200)
     display_name: str = Field(min_length=1, max_length=120)
     role: str = Field(default="viewer", pattern=r"^(owner|admin|developer|editor|operator|viewer)$")
+
+    _validate_display_name = field_validator("display_name")(reject_corrupted_label)
 
 
 class MemberRoleUpdate(BaseModel):
@@ -183,6 +194,23 @@ class ApplicationUpdate(BaseModel):
 
 class ApplicationRollback(BaseModel):
     version: int = Field(ge=1)
+
+
+class ApplicationBuildCreate(BaseModel):
+    version: int | None = Field(default=None, ge=1)
+    image: str | None = Field(default=None, max_length=500)
+
+
+class ApplicationDeploymentCreate(BaseModel):
+    build_id: str | None = None
+    version: int | None = Field(default=None, ge=1)
+    image: str | None = Field(default=None, max_length=500)
+    environment: str = Field(default="production", pattern=r"^(dev|staging|production)$")
+    replicas: int = Field(default=1, ge=1, le=50)
+    container_port: int = Field(default=8080, ge=1, le=65535)
+    health_path: str = Field(default="/healthz", max_length=200)
+    env: dict[str, str] = Field(default_factory=dict)
+    secret_refs: dict[str, str] = Field(default_factory=dict)
 
 
 class QuotaUpdate(BaseModel):
@@ -370,6 +398,7 @@ class DatabaseCreate(BaseModel):
 class DatabaseQuery(BaseModel):
     sql: str = Field(min_length=1, max_length=12000)
     parameters: dict[str, Any] = Field(default_factory=dict)
+    approval_id: str | None = None
 
 
 class DatabaseColumnPolicy(BaseModel):
@@ -379,6 +408,10 @@ class DatabaseColumnPolicy(BaseModel):
 
 class DatabasePolicyUpdate(BaseModel):
     columns: dict[str, DatabaseColumnPolicy] = Field(default_factory=dict)
+    require_approval: bool = False
+    require_native_read_only: bool = True
+    max_rows: int = Field(default=100, ge=1, le=1000)
+    query_timeout_ms: int = Field(default=8000, ge=500, le=60000)
 
 
 class MarketplaceCreate(BaseModel):
@@ -399,6 +432,18 @@ class PublishBindingCreate(BaseModel):
 class ApprovalDecision(BaseModel):
     approved: bool
     comment: str = ""
+
+
+class ApprovalPolicyCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+    request_type: str = Field(min_length=2, max_length=80)
+    resource_type: str = Field(default="", max_length=40)
+    approver_roles: list[str] = Field(default_factory=lambda: ["admin", "owner"])
+    conditions: dict[str, Any] = Field(default_factory=dict)
+    min_approvals: int = Field(default=1, ge=1, le=20)
+    allow_self_approval: bool = False
+    expires_in_minutes: int = Field(default=1440, ge=5, le=43200)
+    enabled: bool = True
 
 
 class InterventionRuleCreate(BaseModel):

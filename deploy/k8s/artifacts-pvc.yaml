@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: enterprise-ai-artifacts
+  namespace: enterprise-ai
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests: {storage: 100Gi}

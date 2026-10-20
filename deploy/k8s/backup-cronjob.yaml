@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: enterprise-ai-backups
+  namespace: enterprise-ai
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: {storage: 100Gi}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: enterprise-ai-backup
+  namespace: enterprise-ai
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: {app: enterprise-ai-backup}
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: backup
+              image: enterprise-ai-platform/backup:latest
+              env:
+                - name: BACKUP_DATABASE_URL
+                  valueFrom: {secretKeyRef: {name: enterprise-ai-secrets, key: BACKUP_DATABASE_URL}}
+                - {name: BACKUP_DIR, value: /backups}
+                - {name: ARTIFACT_DIR, value: /artifacts/artifacts}
+                - {name: BACKUP_RETENTION_DAYS, value: "30"}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: ["ALL"]}
+              resources:
+                requests: {cpu: "100m", memory: "256Mi"}
+                limits: {cpu: "1", memory: "1Gi"}
+              volumeMounts:
+                - {name: backups, mountPath: /backups}
+                - {name: artifacts, mountPath: /artifacts, readOnly: true}
+                - {name: tmp, mountPath: /tmp}
+          volumes:
+            - name: backups
+              persistentVolumeClaim: {claimName: enterprise-ai-backups}
+            - name: artifacts
+              persistentVolumeClaim: {claimName: enterprise-ai-artifacts}
+            - name: tmp
+              emptyDir: {sizeLimit: 5Gi}

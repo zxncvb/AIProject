@@ -235,6 +235,11 @@ class Document(Base):
     content: Mapped[str] = mapped_column(Text)
     checksum: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(30), default="ready")
+    mime_type: Mapped[str] = mapped_column(String(160), default="")
+    file_size: Mapped[int] = mapped_column(Integer, default=0)
+    extraction_method: Mapped[str] = mapped_column(String(30), default="parser")
+    security_status: Mapped[str] = mapped_column(String(30), default="clean", index=True)
+    security_report_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -427,6 +432,45 @@ class ApplicationVersion(Base):
     status: Mapped[str] = mapped_column(String(30), default="draft")
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ApplicationBuild(Base):
+    __tablename__ = "application_builds"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    application_id: Mapped[str] = mapped_column(ForeignKey("applications.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    image: Mapped[str] = mapped_column(String(500), default="")
+    source_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    output_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ApplicationDeployment(Base):
+    __tablename__ = "application_deployments"
+    __table_args__ = (UniqueConstraint("application_id", "environment", "revision", name="uq_application_deployment_revision"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    application_id: Mapped[str] = mapped_column(ForeignKey("applications.id"), index=True)
+    build_id: Mapped[str | None] = mapped_column(ForeignKey("application_builds.id"), nullable=True, index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    revision: Mapped[int] = mapped_column(Integer)
+    environment: Mapped[str] = mapped_column(String(40), default="production", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    image: Mapped[str] = mapped_column(String(500))
+    replicas: Mapped[int] = mapped_column(Integer, default=1)
+    endpoint_url: Mapped[str] = mapped_column(String(800), default="")
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class ComputeQuota(Base):
@@ -672,6 +716,22 @@ class PublishBinding(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class PublishDelivery(Base):
+    __tablename__ = "publish_deliveries"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    binding_id: Mapped[str] = mapped_column(ForeignKey("publish_bindings.id"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    error: Mapped[str] = mapped_column(Text, default="")
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class ApprovalRequest(Base):
     __tablename__ = "approval_requests"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -687,6 +747,36 @@ class ApprovalRequest(Base):
     comment: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ApprovalPolicy(Base):
+    __tablename__ = "approval_policies"
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_approval_policy_name"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    request_type: Mapped[str] = mapped_column(String(80), index=True)
+    resource_type: Mapped[str] = mapped_column(String(40), default="")
+    approver_roles_json: Mapped[list[str]] = mapped_column(JsonType, default=list)
+    conditions_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    min_approvals: Mapped[int] = mapped_column(Integer, default=1)
+    allow_self_approval: Mapped[bool] = mapped_column(Boolean, default=False)
+    expires_in_minutes: Mapped[int] = mapped_column(Integer, default=1440)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ApprovalVote(Base):
+    __tablename__ = "approval_votes"
+    __table_args__ = (UniqueConstraint("request_id", "approver_id", name="uq_approval_vote_approver"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    request_id: Mapped[str] = mapped_column(ForeignKey("approval_requests.id"), index=True)
+    approver_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    approved: Mapped[bool] = mapped_column(Boolean)
+    comment: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class InterventionRule(Base):

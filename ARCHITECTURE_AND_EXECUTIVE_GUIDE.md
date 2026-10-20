@@ -229,3 +229,30 @@ enterprise_ai_platform/
 ```powershell
 ./deploy/acceptance/priority-runtime.ps1 -Password '管理员密码'
 ```
+## 当前生产架构补充（2026-10-21）
+
+```mermaid
+flowchart LR
+  U[企业用户 / SSO] --> UI[中文蓝白控制台]
+  UI --> API[FastAPI 控制面 / RBAC / RLS]
+  API --> PG[(PostgreSQL)]
+  API --> RS[(Redis Streams)]
+  API --> QD[(Qdrant)]
+  API --> CS[内容安全 / DLP / OCR / ClamAV]
+  RS --> WK[工作流与索引 Worker]
+  WK --> MD[模型与企业工具]
+  API --> OB[发布 Outbox]
+  OB --> WK --> CH[飞书 / 钉钉 / 企业微信 / A2A]
+  API --> AB[应用构建与部署记录]
+  AC[Application Controller] --> AB
+  AC --> BK[Rootless BuildKit Job]
+  BK --> CR[企业镜像仓库]
+  AC --> AR[隔离应用运行区]
+  CR --> AR
+  API --> PM[Prometheus / Loki / Tempo]
+  BKP[备份 CronJob] --> PG
+  BKP --> RWX[共享附件卷]
+  BKP --> S3[异地对象存储]
+```
+
+向企业领导汇报时，可把中台归纳为六个可验收层面：统一身份与租户权限、模型与算力治理、知识/Agent/工作流开发平台、低代码和全代码应用交付、生产安全与可观测、备份容灾与持续交付。每一层都应同时说明“平台已实现什么、企业需提供什么、上线用什么指标验收”，避免只展示页面数量。

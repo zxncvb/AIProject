@@ -3,7 +3,7 @@ import time
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from prometheus_client import Counter, Histogram, generate_latest
+from prometheus_client import Counter, Gauge, Histogram, generate_latest
 
 try:
     from opentelemetry import trace
@@ -23,6 +23,11 @@ run_failures = Counter("ai_platform_workflow_failures_total", "Workflow failures
 run_duration = Histogram("ai_platform_workflow_duration_seconds", "Workflow duration", ["tenant"])
 llm_calls = Counter("ai_platform_llm_calls_total", "LLM calls", ["tenant", "provider", "status"])
 tool_calls = Counter("ai_platform_tool_calls_total", "Tool and plugin calls", ["tenant", "kind", "status"])
+job_queue_messages = Gauge("ai_platform_job_queue_messages", "Messages waiting or pending in the reliable job stream")
+job_dead_messages = Gauge("ai_platform_job_dead_messages", "Jobs in the dead-letter stream")
+publication_failed = Gauge("ai_platform_publication_failed", "Failed or stopped publication deliveries")
+application_deployment_failed = Gauge("ai_platform_application_deployment_failed", "Failed full-code application deployments")
+approval_pending = Gauge("ai_platform_approval_pending", "Pending enterprise approval requests")
 
 
 def setup_telemetry() -> None:

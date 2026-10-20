@@ -25,3 +25,35 @@ groups:
         annotations:
           summary: "模型调用错误率过高"
           description: "最近 10 分钟模型调用错误率超过 10%。"
+      - alert: EnterpriseAIJobDeadLetterDetected
+        expr: ai_platform_job_dead_messages > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "可靠任务队列存在死信"
+          description: "至少一个任务已耗尽自动重试，需要在生产治理中心处理。"
+      - alert: EnterpriseAIPublicationDeliveryFailed
+        expr: ai_platform_publication_failed > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "企业发布渠道投递失败"
+          description: "发布投递持续失败，请检查渠道地址、签名密钥和白名单。"
+      - alert: EnterpriseAIApplicationDeploymentFailed
+        expr: ai_platform_application_deployment_failed > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "全代码应用部署失败"
+          description: "至少一个托管应用部署处于失败状态。"
+      - alert: EnterpriseAIApprovalBacklogHigh
+        expr: ai_platform_approval_pending > 50
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "企业审批积压"
+          description: "待处理审批单超过 50 个并持续 30 分钟。"

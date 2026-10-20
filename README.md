@@ -11,13 +11,13 @@
 5. 企业登录：OIDC 单点登录和 LDAP 登录 API，并在中文前端提供登录入口。
 6. 可观测：Prometheus、Alertmanager、Grafana、Loki、Promtail、Tempo、OpenTelemetry。
 7. 工作流引擎：版本化 DAG、发布、灰度、Webhook、条件节点、节点重试和超时。
-8. 知识库：TXT/Markdown/JSON/CSV/PDF/DOCX/XLSX 文档解析，Redis 异步索引，关键词与向量混合检索。
-9. 应用中心：低代码/全代码应用资产、版本、运行时配置和发布状态。
+8. 知识库：PDF/Office/文本/图片 OCR、ClamAV 可选病毒扫描、DLP、安全元数据、Redis 异步索引和混合检索。
+9. 应用中心：低代码发布，以及全代码 BuildKit 构建、Kubernetes 托管、健康检查、下线和回滚。
 10. 工作流高级调度：真实条件分支、循环/并行节点、间隔定时触发、租户并发配额和运行用量。
 11. 安全治理：Redis API 限流、安全响应头、插件地址白名单和插件/技能启停生命周期。
 12. 生产运行增强：应用运行入口、应用回滚/删除、工作流图校验、输入 Schema 校验和模型健康检测。
 13. 权限与扩展治理：自定义角色权限目录、知识库成员授权、Skill 执行、插件密钥透传和 MCP 服务登记。
-14. 审计与运维：审计 CSV 导出、运行失败率/用量摘要、密码变更和 CI 单元测试门禁。
+14. 审计与运维：审计 CSV、生产治理中心、可靠发布/死信恢复、SLO 指标、备份容灾和多层 CI 门禁。
 
 ## Docker 启动
 
@@ -64,12 +64,12 @@ docker compose up -d --build
 
 ### 2026-10-20 可靠性与中文界面补强
 
-- 模型体验支持当前用户的持久化会话、文本附件（每个 16 KiB、最多 3 个）、知识库检索引用和 Token 记账；附件不是图片/OCR，也没有宣称联网搜索。
+- 模型体验支持持久化会话、知识库引用和安全附件解析；PDF、Office、文本与图片可通过统一内容安全层处理，扫描件/图片需要配置 `OCR_ENDPOINT`。
 - 工作流运行支持幂等键、失败任务列表、失败/取消后重试、取消权限检查；人工审批等待状态不会误记为成功。
 - 模型网关支持暂时错误重试、租户内健康排序、配置回退提供商和短时熔断；只有在提供商配置回退 ID 后才会跨提供商切换。
-- 全代码应用通过受限 Kubernetes Job 批处理运行。必须提供真实命令和运行时清单；本地 Docker Compose 不包含 Kubernetes 控制器，不能把“已部署”当作本地可执行。
+- 全代码应用支持受限 Job 批处理，也支持 BuildKit 构建镜像后由 `application-controller` 托管为 Kubernetes Deployment；Docker Compose 可管理资产和构建请求，但实际集群构建/托管需要 Kubernetes、镜像仓库和控制器。
 - 公开应用必须显式配置 `public: true`；全代码公开调用必须配置密钥，公开详情接口不再回传源码或运行时清单。建议只保存 `app_key_sha256`，不要保存明文密钥。
-- 数据库查询增加按角色的字段可见性/结果脱敏策略及管理员页面。此策略只约束 API 返回值，不替代数据库自身的只读账号、行级权限和 SQL 审核。
+- 数据库查询增加账号原生只读验证、审批单、SQL 摘要绑定、超时/行数限制、字段可见性和结果脱敏；生产建议同时启用数据库自身的只读账号与平台审批。
 - 应用中心、模型体验、运行中心改为可操作的中文页面；前端 UTF-8 构建，状态显示采用中文映射。
 
 升级已有数据时，请先备份数据库，再执行 `docker compose up -d --build`。Compose 会先运行一次性 `migrate` 和 `db-security` 服务，迁移成功并重新应用 RLS 后，才启动后端和 Worker；任一步失败都会阻止业务服务带病启动。
@@ -103,6 +103,25 @@ docker compose logs migrate db-security backend worker
 ```
 
 Kubernetes 环境还需部署 `deploy/k8s/priority-runtime.yaml`，并把 PostgreSQL、Redis、Qdrant 换成企业运维的高可用 Operator 集群。`deploy/k8s/stateful-ha.example.yaml` 仅为 Operator 配置参考，必须在目标集群完成备份恢复、故障切换和数据一致性验收后再上线。
+
+全代码托管还需创建 `enterprise-ai-apps/application-registry-auth`，字段示例见 `deploy/k8s/application-registry-auth.example.yaml`；`enterprise-ai-artifacts` 要求集群提供 ReadWriteMany StorageClass。若企业存储不支持 RWX，应在上线前改接对象存储，不能退回 `emptyDir`。
+
+## Linux 备份与灾备
+
+构建备份镜像并运行一次备份：
+
+```bash
+docker build -t enterprise-ai-platform/backup:latest deploy/backup
+docker run --rm \
+  -e BACKUP_DATABASE_URL="$BACKUP_DATABASE_URL" \
+  -e BACKUP_S3_URI="$BACKUP_S3_URI" \
+  -e BACKUP_AGE_RECIPIENT="$BACKUP_AGE_RECIPIENT" \
+  -v enterprise_ai_platform-platform-artifacts:/artifacts:ro \
+  -v "$PWD/backups:/backups" \
+  enterprise-ai-platform/backup:latest
+```
+
+恢复脚本要求显式设置 `RESTORE_CONFIRM=RESTORE`，并在写入前验证归档内 SHA-256。`deploy/backup/dr-test.sh` 会启动临时 PostgreSQL 和临时附件卷做隔离演练，不覆盖生产数据库。Kubernetes 默认每天 02:00 运行 `enterprise-ai-backup` CronJob；生产必须把备份复制到异地对象存储并定期验证 RPO/RTO。
 
 优先级能力验收：
 

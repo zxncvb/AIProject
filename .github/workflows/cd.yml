@@ -30,6 +30,11 @@ jobs:
           context: frontend
           push: true
           tags: ${{ steps.meta.outputs.tag }}-frontend
+      - uses: docker/build-push-action@v6
+        with:
+          context: deploy/backup
+          push: true
+          tags: ${{ steps.meta.outputs.tag }}-backup
   deploy:
     needs: images
     if: github.ref == 'refs/heads/main'
@@ -52,10 +57,13 @@ jobs:
           kubectl -n enterprise-ai set image deployment/enterprise-ai-backend backend=${{ needs.images.outputs.tag }}-backend
           kubectl -n enterprise-ai set image deployment/enterprise-ai-worker worker=${{ needs.images.outputs.tag }}-backend
           kubectl -n enterprise-ai set image deployment/sandbox-controller controller=${{ needs.images.outputs.tag }}-backend
+          kubectl -n enterprise-ai set image deployment/application-controller controller=${{ needs.images.outputs.tag }}-backend
           kubectl -n enterprise-ai set image deployment/enterprise-ai-frontend frontend=${{ needs.images.outputs.tag }}-frontend
+          kubectl -n enterprise-ai set image cronjob/enterprise-ai-backup backup=${{ needs.images.outputs.tag }}-backup
           kubectl -n enterprise-ai rollout status deployment/enterprise-ai-backend --timeout=180s
           kubectl -n enterprise-ai rollout status deployment/enterprise-ai-worker --timeout=180s
           kubectl -n enterprise-ai rollout status deployment/sandbox-controller --timeout=180s
+          kubectl -n enterprise-ai rollout status deployment/application-controller --timeout=180s
           kubectl -n enterprise-ai rollout status deployment/enterprise-ai-frontend --timeout=180s
   evaluation:
     needs: deploy

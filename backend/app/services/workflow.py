@@ -11,23 +11,24 @@ from typing import Any
 import httpx
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from ..config import get_settings
 from ..db import AdminSessionLocal
-from ..models import Agent, ComputeUsage, EvaluationJob, GpuLease, ModelProvider, Plugin, Project, SandboxRun, Skill, TenantPolicy, Workflow, WorkflowRun, WorkflowSchedule, WorkflowVersion
+from ..models import Agent, ApprovalRequest, ComputeUsage, EvaluationJob, GpuLease, ModelProvider, Plugin, Project, PublishDelivery, SandboxRun, Skill, TenantPolicy, Workflow, WorkflowRun, WorkflowSchedule, WorkflowVersion
 from .knowledge import search_chunks
 from .llm import call_chat, call_routed_chat
 from .observability import new_trace_id, run_failures, runs_total, tool_calls
 from .safety import inspect_text
 from .sandbox import build_job_manifest
+from .publication import deliver as deliver_publication
 
 
 QUEUE = "ai_platform:workflow_runs"
 INDEX_QUEUE = "ai_platform:knowledge_index"
 EVALUATION_QUEUE = "ai_platform:evaluation_jobs"
 SANDBOX_QUEUE = "ai_platform:sandbox_runs"
-JOB_KINDS = {"workflow", "knowledge_index", "evaluation", "sandbox"}
+JOB_KINDS = {"workflow", "knowledge_index", "evaluation", "sandbox", "publication_delivery"}
 
 
 class WorkflowCancelled(Exception):
@@ -191,7 +192,14 @@ async def execute_run(run_id: str) -> None:
             await db.commit()
             runs_total.labels(run.tenant_id, "cancelled").inc()
         except Exception as exc:
-            run.status, run.error, run.finished_at = "failed", str(exc), now()
+            run.error = str(exc)
+            compensation_errors: list[str] = []
+            try:
+                compensation_errors = await execute_compensations(db, run, version)
+            except Exception as compensation_exc:
+                compensation_errors.append(f"补偿调度失败: {compensation_exc}")
+            suffix = f"；补偿异常: {' | '.join(compensation_errors)}" if compensation_errors else ""
+            run.status, run.error, run.finished_at = "failed", f"{exc}{suffix}", now()
             db.add(ComputeUsage(tenant_id=run.tenant_id, run_id=run.id, cost_center=run.cost_center or "unassigned", cpu_milliseconds=int((time.perf_counter() - started_clock) * 1000)))
             await db.commit()
             run_failures.labels(run.tenant_id).inc()
@@ -306,6 +314,41 @@ async def dispatch_schedules(redis: Redis) -> None:
         await enqueue_job("workflow", run_id, redis)
 
 
+async def dispatch_publication_deliveries(redis: Redis) -> None:
+    """Drain the database outbox while recovering expired enqueue reservations."""
+    current = now()
+    async with AdminSessionLocal() as db:
+        rows = (await db.execute(
+            select(PublishDelivery)
+            .where(
+                or_(
+                    PublishDelivery.status == "queued",
+                    (PublishDelivery.status == "failed") & (PublishDelivery.next_attempt_at <= current),
+                    (PublishDelivery.status == "enqueued") & (PublishDelivery.next_attempt_at <= current),
+                )
+            )
+            .order_by(PublishDelivery.created_at)
+            .limit(50)
+            .with_for_update(skip_locked=True)
+        )).scalars().all()
+        delivery_ids = [row.id for row in rows]
+        for row in rows:
+            row.status = "enqueued"
+            row.next_attempt_at = current + timedelta(minutes=2)
+        await db.commit()
+    for delivery_id in delivery_ids:
+        try:
+            await enqueue_job("publication_delivery", delivery_id, redis)
+        except Exception as exc:
+            async with AdminSessionLocal() as db:
+                row = await db.scalar(select(PublishDelivery).where(PublishDelivery.id == delivery_id))
+                if row and row.status == "enqueued":
+                    row.status = "queued"
+                    row.error = f"发布任务入队失败: {exc}"[:2000]
+                    row.next_attempt_at = None
+                    await db.commit()
+
+
 def next_graph_nodes(graph: dict[str, Any], node: dict[str, Any], output: dict[str, Any]) -> list[str]:
     """Resolve outgoing edges, including true/false condition handles."""
     node_id = str(node.get("id", ""))
@@ -357,6 +400,10 @@ async def execute_graph(db, run: WorkflowRun, version: WorkflowVersion) -> tuple
         context["nodes"][node_id] = output
         state["nodes"] = context["nodes"]
         state["last_node_id"] = node_id
+        completed_order = list(state.get("completed_order", []))
+        if node_id not in completed_order:
+            completed_order.append(node_id)
+        state["completed_order"] = completed_order
         next_nodes = next_graph_nodes(graph, node, output)
         pending.extend(item for item in next_nodes if item not in completed and item not in pending)
         state["pending_nodes"] = pending
@@ -365,10 +412,58 @@ async def execute_graph(db, run: WorkflowRun, version: WorkflowVersion) -> tuple
         if node_type in {"approval", "human_approval"} and not output.get("approved", False):
             run.status = "waiting_approval"
             state["waiting_node_id"] = node_id
+            existing = await db.scalar(select(ApprovalRequest).where(ApprovalRequest.tenant_id == run.tenant_id, ApprovalRequest.request_type == "workflow.node", ApprovalRequest.resource_id == run.id, ApprovalRequest.status == "pending"))
+            if not existing:
+                db.add(ApprovalRequest(
+                    tenant_id=run.tenant_id,
+                    applicant_id=run.created_by,
+                    request_type="workflow.node",
+                    resource_type="workflow_run",
+                    resource_id=run.id,
+                    title=str(config.get("title") or f"工作流节点审批：{node_id}"),
+                    payload_json={"run_id": run.id, "node_id": node_id, "approver_roles": config.get("approver_roles", ["admin", "owner"]), "min_approvals": int(config.get("min_approvals", 1))},
+                ))
             await db.commit()
             runs_total.labels(run.tenant_id, "waiting_approval").inc()
             return context["nodes"], state
     return context["nodes"], state
+
+
+async def execute_compensations(db, run: WorkflowRun, version: WorkflowVersion) -> list[str]:
+    """Execute configured node compensations in reverse completion order.
+
+    A node opts in with ``data.compensation`` using the same shape as a normal
+    node (for example an HTTP or plugin call). Results are persisted so a
+    retried worker never repeats an already successful compensation.
+    """
+    graph = version.graph_json or {}
+    nodes = {str(node["id"]): node for node in graph.get("nodes", []) if node.get("id")}
+    state = dict(run.state_json or {})
+    compensation_state = dict(state.get("compensations", {}))
+    context = {"input": dict(run.input_json or {}), "nodes": dict(state.get("nodes", {})), "run": {"id": run.id, "error": run.error}}
+    errors: list[str] = []
+    for node_id in reversed(list(state.get("completed_order", []))):
+        node = nodes.get(node_id) or {}
+        config = node.get("data") or node.get("config") or {}
+        compensation = config.get("compensation")
+        if not isinstance(compensation, dict) or compensation_state.get(node_id, {}).get("status") == "succeeded":
+            continue
+        kind = str(compensation.get("kind") or compensation.get("type") or "").lower()
+        compensation_config = compensation.get("data") or compensation.get("config") or compensation
+        if not kind or kind in {"approval", "human_approval", "loop", "parallel"}:
+            errors.append(f"{node_id}: 补偿节点类型无效")
+            compensation_state[node_id] = {"status": "failed", "error": "补偿节点类型无效"}
+            continue
+        try:
+            output = await asyncio.wait_for(execute_node(db, run, kind, f"compensate:{node_id}", compensation_config, context), timeout=max(1, min(int(compensation_config.get("timeout_seconds", 60)), 300)))
+            compensation_state[node_id] = {"status": "succeeded", "output": output, "finished_at": now().isoformat()}
+        except Exception as exc:
+            compensation_state[node_id] = {"status": "failed", "error": str(exc)[:1000], "finished_at": now().isoformat()}
+            errors.append(f"{node_id}: {exc}")
+        state["compensations"] = compensation_state
+        run.state_json = state
+        await db.commit()
+    return errors
 
 
 async def execute_node(db, run: WorkflowRun, node_type: str, node_id: str, config: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -494,6 +589,7 @@ async def worker_loop() -> None:
 
         while True:
             await dispatch_schedules(redis)
+            await dispatch_publication_deliveries(redis)
             await reconcile_gpu_leases()
 
             claimed = await redis.xautoclaim(
@@ -528,6 +624,8 @@ async def worker_loop() -> None:
                         await execute_evaluation(resource_id)
                     elif kind == "sandbox":
                         await execute_sandbox(resource_id)
+                    elif kind == "publication_delivery":
+                        await deliver_publication(resource_id)
                     else:
                         raise ValueError(f"unsupported job kind: {kind}")
                 except Exception as exc:
@@ -541,7 +639,7 @@ async def worker_loop() -> None:
                         "attempts": str(attempts + 1),
                         "last_error": str(exc)[:1000],
                     }
-                    target = settings.job_stream if attempts < 4 else f"{settings.job_stream}:dead"
+                    target = settings.job_stream if attempts + 1 < settings.worker_max_attempts else f"{settings.job_stream}:dead"
                     await redis.xadd(target, retry_fields, maxlen=100000, approximate=True)
                 finally:
                     await redis.xack(settings.job_stream, settings.job_consumer_group, message_id)

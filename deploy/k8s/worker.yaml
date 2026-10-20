@@ -33,6 +33,6 @@ spec:
             - {name: tmp, mountPath: /tmp}
       volumes:
         - name: app-data
-          emptyDir: {}
+          persistentVolumeClaim: {claimName: enterprise-ai-artifacts}
         - name: tmp
           emptyDir: {}

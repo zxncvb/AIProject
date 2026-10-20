@@ -25,7 +25,19 @@ class Settings(BaseSettings):
     trusted_hosts: str = "*"
     upload_max_bytes: int = 26214400
     upload_max_uncompressed_bytes: int = 104857600
+    upload_max_archive_entries: int = 10000
+    upload_allow_macros: bool = False
+    upload_dlp_action: str = "report"
     knowledge_max_extracted_chars: int = 5000000
+    clamav_host: str = ""
+    clamav_port: int = 3310
+    clamav_required: bool = False
+    content_scan_timeout_seconds: int = 20
+    ocr_endpoint: str = ""
+    ocr_api_key: str = ""
+    ocr_language: str = "chi_sim+eng"
+    ocr_timeout_seconds: int = 120
+    ocr_min_text_chars: int = 40
     qdrant_url: str = "http://qdrant:6333"
     qdrant_vector_size: int = 1536
     embedding_model: str = "text-embedding-3-small"
@@ -71,6 +83,7 @@ class Settings(BaseSettings):
     job_stream: str = "ai_platform:jobs"
     job_consumer_group: str = "enterprise-workers"
     worker_claim_idle_ms: int = 60000
+    worker_max_attempts: int = 5
     sandbox_runtime_class: str = ""
     sandbox_ephemeral_storage_mb: int = 256
     evaluation_queue: str = "ai_platform:evaluation_jobs"
@@ -79,6 +92,12 @@ class Settings(BaseSettings):
     alert_feishu_webhook_url: str = ""
     alert_wecom_webhook_url: str = ""
     sqlserver_odbc_driver: str = "ODBC Driver 18 for SQL Server"
+    application_runtime_namespace: str = "enterprise-ai-apps"
+    application_base_domain: str = ""
+    application_registry: str = ""
+    application_buildkit_image: str = "moby/buildkit:v0.20.2-rootless"
+    application_runtime_class: str = ""
+    publication_signing_secret: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 

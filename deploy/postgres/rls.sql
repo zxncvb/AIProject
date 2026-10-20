@@ -19,7 +19,9 @@ BEGIN
     'knowledge_assets', 'agent_events', 'api_keys', 'organizations', 'workspaces',
     'workspace_members', 'agent_configs', 'agent_versions', 'prompt_templates',
     'database_connections', 'marketplace_items', 'favorites', 'publish_channels',
-    'publish_bindings', 'approval_requests', 'intervention_rules'
+    'publish_bindings', 'approval_requests', 'intervention_rules',
+    'application_builds', 'application_deployments', 'publish_deliveries',
+    'approval_policies', 'approval_votes'
   ] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', table_name);
     EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', table_name);
