@@ -1878,7 +1878,7 @@ async def clone_agent(agent_id: str, ctx: EditorContext, db: AsyncSession = Depe
 
 
 @app.delete("/api/agents/{agent_id}")
-async def delete_agent(agent_id: str, ctx: AdminContext, db: AsyncSession = Depends(get_db)):
+async def delete_agent(agent_id: str, ctx: EditorContext, db: AsyncSession = Depends(get_db)):
     agent = await db.scalar(select(Agent).where(Agent.id == agent_id, Agent.tenant_id == ctx.tenant_id))
     if not agent:
         raise HTTPException(status_code=404, detail="Agent 不存在")
