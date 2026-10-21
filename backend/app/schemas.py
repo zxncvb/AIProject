@@ -271,6 +271,11 @@ class KnowledgeBaseCreate(BaseModel):
     description: str = ""
 
 
+class KnowledgeBaseUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=160)
+    description: str | None = None
+
+
 class SkillCreate(BaseModel):
     project_id: str
     name: str = Field(min_length=2, max_length=160)

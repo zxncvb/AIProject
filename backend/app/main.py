@@ -94,6 +94,7 @@ from .schemas import (
     ApplicationUpdate,
     ApprovalRequest,
     KnowledgeBaseCreate,
+    KnowledgeBaseUpdate,
     LDAPLoginRequest,
     LoginRequest,
     LoginResponse,
@@ -2587,6 +2588,26 @@ async def create_kb(body: KnowledgeBaseCreate, ctx: EditorContext, db: AsyncSess
     await audit(db, ctx, "knowledge_base.create", "knowledge_base", row.id)
     await db.commit()
     return {"id": row.id, "name": row.name, "project_id": row.project_id}
+
+
+@app.patch("/api/knowledge-bases/{kb_id}")
+async def update_kb(kb_id: str, body: KnowledgeBaseUpdate, ctx: EditorContext, db: AsyncSession = Depends(get_db)):
+    kb = await db.scalar(select(KnowledgeBase).where(KnowledgeBase.id == kb_id, KnowledgeBase.tenant_id == ctx.tenant_id))
+    if not kb:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+    await require_kb_access(kb_id, ctx, db, write=True)
+    changes = body.model_dump(exclude_unset=True)
+    if body.name is not None:
+        kb.name = body.name
+    if body.description is not None:
+        kb.description = body.description
+    await audit(db, ctx, "knowledge_base.update", "knowledge_base", kb.id, {"changes": changes})
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=f"项目中已存在名为“{body.name}”的知识库") from exc
+    return {"id": kb.id, "name": kb.name, "description": kb.description, "project_id": kb.project_id}
 
 
 @app.delete("/api/knowledge-bases/{kb_id}")
