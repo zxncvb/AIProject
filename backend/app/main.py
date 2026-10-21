@@ -126,6 +126,7 @@ from .schemas import (
     ScheduleUpdate,
     SkillCreate,
     WorkflowCreate,
+    WorkflowUpdate,
     WorkflowRunRequest,
     WorkflowWebhookRequest,
     WorkflowVersionCreate,
@@ -2103,6 +2104,27 @@ async def get_workflow(workflow_id: str, ctx: Context, db: AsyncSession = Depend
     await require_project_access(db, ctx, workflow.project_id)
     version = await db.scalar(select(WorkflowVersion).where(WorkflowVersion.workflow_id == workflow.id, WorkflowVersion.version == workflow.latest_version))
     return {"id": workflow.id, "project_id": workflow.project_id, "name": workflow.name, "slug": workflow.slug, "description": workflow.description, "status": workflow.status, "latest_version": workflow.latest_version, "published_version": workflow.published_version, "graph": version.graph_json if version else {}, "input_schema": version.input_schema if version else {}}
+
+
+@app.patch("/api/workflows/{workflow_id}")
+async def update_workflow(workflow_id: str, body: WorkflowUpdate, ctx: EditorContext, db: AsyncSession = Depends(get_db)):
+    workflow = await db.scalar(select(Workflow).where(Workflow.id == workflow_id, Workflow.tenant_id == ctx.tenant_id))
+    if not workflow:
+        raise HTTPException(status_code=404, detail="工作流不存在")
+    await require_project_access(db, ctx, workflow.project_id, write=True)
+    changes = body.model_dump(exclude_unset=True)
+    if not changes:
+        return {"id": workflow.id, "name": workflow.name, "slug": workflow.slug, "description": workflow.description}
+    for field, value in changes.items():
+        if value is not None:
+            setattr(workflow, field, value)
+    await audit(db, ctx, "workflow.update", "workflow", workflow.id, {"changes": changes})
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="工作流标识已存在") from exc
+    return {"id": workflow.id, "name": workflow.name, "slug": workflow.slug, "description": workflow.description}
 
 
 @app.post("/api/workflows/{workflow_id}/validate")

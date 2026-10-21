@@ -129,6 +129,12 @@ class WorkflowCreate(BaseModel):
     changelog: str = "initial"
 
 
+class WorkflowUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=160)
+    slug: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{1,98}[a-z0-9]$", max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+
+
 class WorkflowVersionCreate(BaseModel):
     graph: dict[str, Any]
     input_schema: dict[str, Any] = Field(default_factory=dict)
