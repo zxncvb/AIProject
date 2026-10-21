@@ -14,3 +14,4 @@
 
 .asset-card{cursor:pointer}.asset-delete{width:auto;padding:4px 8px;font-size:12px;line-height:1.2}
 .workspace-actions{display:flex;gap:6px;align-items:center}.workspace-actions button{width:84px;min-width:84px;height:34px;padding:7px 8px;white-space:nowrap}.workspace-actions .delete-button{width:84px;font-size:13px;line-height:1}.workspace-delete{color:#b13b52;border-color:#efc2ca;background:#fff8f9;font-weight:600}.workspace-delete:hover{color:#982d45;border-color:#d88796;background:#fff0f2}
+.workspace-layout{grid-template-columns:minmax(0,1.35fr) minmax(320px,.65fr)}.workspace-table .table-row,.workspace-table .table-head{grid-template-columns:minmax(120px,1.2fr) 84px minmax(140px,1.35fr) 270px}.workspace-table .table-head span:nth-child(2),.workspace-table .table-row span:nth-child(2){white-space:nowrap}
