@@ -102,6 +102,16 @@ class ProviderCreate(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProviderUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    provider_type: str | None = None
+    base_url: str | None = None
+    default_model: str | None = Field(default=None, min_length=1, max_length=160)
+    api_key: str | None = None
+    config: dict[str, Any] | None = None
+    enabled: bool | None = None
+
+
 class AgentCreate(BaseModel):
     project_id: str
     name: str = Field(min_length=2, max_length=160)

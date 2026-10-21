@@ -112,6 +112,7 @@ from .schemas import (
     PluginCreate,
     ProjectCreate,
     ProviderCreate,
+    ProviderUpdate,
     QuotaUpdate,
     TenantPolicyUpdate,
     PublicAppInvokeRequest,
@@ -1726,6 +1727,38 @@ async def create_model(body: ProviderCreate, ctx: AdminContext, db: AsyncSession
         raise HTTPException(status_code=409, detail="模型提供商名称已存在") from exc
     await audit(db, ctx, "model_provider.create", "model_provider", row.id, {"name": row.name})
     await db.commit()
+    return {"id": row.id, "name": row.name, "provider_type": row.provider_type, "base_url": row.base_url, "default_model": row.default_model, "enabled": row.enabled, "has_api_key": bool(row.api_key_encrypted)}
+
+
+@app.patch("/api/models/{provider_id}")
+async def update_model(provider_id: str, body: ProviderUpdate, ctx: AdminContext, db: AsyncSession = Depends(get_db)):
+    row = await db.scalar(select(ModelProvider).where(ModelProvider.id == provider_id, ModelProvider.tenant_id == ctx.tenant_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="模型提供商不存在")
+    changes = body.model_dump(exclude_unset=True)
+    if body.name is not None:
+        row.name = body.name
+    if body.provider_type is not None:
+        row.provider_type = body.provider_type
+    if body.base_url is not None:
+        row.base_url = body.base_url.rstrip("/")
+    if body.default_model is not None:
+        row.default_model = body.default_model
+    if body.config is not None:
+        row.config_json = body.config
+    if body.enabled is not None:
+        row.enabled = body.enabled
+    if body.api_key:
+        row.api_key_encrypted = encrypt_secret(body.api_key)
+        changes["api_key"] = "已更新（密文）"
+    else:
+        changes.pop("api_key", None)
+    await audit(db, ctx, "model_provider.update", "model_provider", row.id, {"changes": changes})
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="模型提供商名称已存在") from exc
     return {"id": row.id, "name": row.name, "provider_type": row.provider_type, "base_url": row.base_url, "default_model": row.default_model, "enabled": row.enabled, "has_api_key": bool(row.api_key_encrypted)}
 
 
