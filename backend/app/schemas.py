@@ -346,6 +346,12 @@ class WorkspaceCreate(BaseModel):
     description: str = ""
 
 
+class WorkspaceUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=160)
+    slug: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{1,98}[a-z0-9]$", max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+
+
 class WorkspaceMemberUpsert(BaseModel):
     user_id: str
     role: str = Field(default="viewer", pattern=r"^(owner|admin|editor|viewer)$")

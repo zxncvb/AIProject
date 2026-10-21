@@ -148,6 +148,7 @@ from .schemas import (
     PromptTemplateCreate,
     PublishBindingCreate,
     WorkspaceCreate,
+    WorkspaceUpdate,
     WorkspaceMemberUpsert,
     KnowledgeAssetCreate,
     AgentFeedbackCreate,
@@ -2978,6 +2979,47 @@ async def create_workspace(body: WorkspaceCreate, ctx: AdminContext, db: AsyncSe
     await audit(db, ctx, "workspace.create", "workspace", row.id, {"name": row.name})
     await db.commit()
     return {"id": row.id, "name": row.name, "slug": row.slug, "type": row.workspace_type}
+
+
+@app.patch("/api/workspaces/{workspace_id}")
+async def update_workspace(workspace_id: str, body: WorkspaceUpdate, ctx: Context, db: AsyncSession = Depends(get_db)):
+    workspace = await db.scalar(select(Workspace).where(Workspace.id == workspace_id, Workspace.tenant_id == ctx.tenant_id))
+    if not workspace:
+        raise HTTPException(status_code=404, detail="工作区不存在")
+    await require_workspace_access(db, ctx, workspace_id, write=True)
+    changes = body.model_dump(exclude_unset=True)
+    if not changes:
+        return {"id": workspace.id, "name": workspace.name, "slug": workspace.slug, "type": workspace.workspace_type, "description": workspace.description}
+    for field, value in changes.items():
+        if value is not None:
+            setattr(workspace, field, value)
+    await audit(db, ctx, "workspace.update", "workspace", workspace.id, {"changes": changes})
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="工作区标识已存在") from exc
+    return {"id": workspace.id, "name": workspace.name, "slug": workspace.slug, "type": workspace.workspace_type, "description": workspace.description}
+
+
+@app.delete("/api/workspaces/{workspace_id}")
+async def delete_workspace(workspace_id: str, ctx: AdminContext, db: AsyncSession = Depends(get_db)):
+    workspace = await db.scalar(select(Workspace).where(Workspace.id == workspace_id, Workspace.tenant_id == ctx.tenant_id))
+    if not workspace:
+        raise HTTPException(status_code=404, detail="工作区不存在")
+    resource_counts = {
+        "projects": await db.scalar(select(func.count()).select_from(Project).where(Project.workspace_id == workspace_id, Project.tenant_id == ctx.tenant_id)) or 0,
+        "agents": await db.scalar(select(func.count()).select_from(AgentConfig).where(AgentConfig.workspace_id == workspace_id, AgentConfig.tenant_id == ctx.tenant_id)) or 0,
+        "prompts": await db.scalar(select(func.count()).select_from(PromptTemplate).where(PromptTemplate.workspace_id == workspace_id, PromptTemplate.tenant_id == ctx.tenant_id)) or 0,
+        "databases": await db.scalar(select(func.count()).select_from(DatabaseConnection).where(DatabaseConnection.workspace_id == workspace_id, DatabaseConnection.tenant_id == ctx.tenant_id)) or 0,
+    }
+    if any(resource_counts.values()):
+        raise HTTPException(status_code=409, detail=f"工作区仍有资源，不能删除：项目 {resource_counts['projects']} 个、Agent 配置 {resource_counts['agents']} 个、提示词 {resource_counts['prompts']} 个、数据库连接 {resource_counts['databases']} 个。请先迁移资源。")
+    await audit(db, ctx, "workspace.delete", "workspace", workspace.id, {"name": workspace.name})
+    await db.execute(delete(WorkspaceMember).where(WorkspaceMember.workspace_id == workspace.id, WorkspaceMember.tenant_id == ctx.tenant_id))
+    await db.delete(workspace)
+    await db.commit()
+    return {"id": workspace_id, "deleted": True}
 
 
 @app.get("/api/workspaces/{workspace_id}/members")
