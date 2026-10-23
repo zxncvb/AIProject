@@ -596,3 +596,10 @@ README 中有三处表述高于当前实现，建议在售前材料和验收文�
 - 数据库迁移未完成、迁移版本落后或 Redis 不可用时，`/readyz` 明确返回 HTTP 503，不会让编排系统把未完成迁移的实例加入流量。
 - CI 新增所有 `deploy/ci/*.sh` 的 Bash 语法检查。
 - 本地验证：94 个后端测试通过，服务层覆盖率 41.78%，Python 编译、Compose 配置和 Kustomize 渲染通过；真实 Docker daemon、PostgreSQL/Redis 集成和 GitHub 远程检查仍需环境验收。
+
+---
+
+## 2026-10-23 追加复核：Agent 流式失败闭环
+
+- 新增 API/ASGI 级失败路径回归：部分 token 已输出后，模型/工具异常仍会落库失败用量、`message_failed` 事件和审计记录，并返回 `error` SSE 事件。
+- 该路径与正常 `token/tool_call/tool_result/done` 链路分开验收，避免只验证生成器正常结束而遗漏失败计费与审计。

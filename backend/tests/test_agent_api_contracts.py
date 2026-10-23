@@ -13,6 +13,7 @@ class AgentDatabase:
         self.values = iter((agent, provider))
         self.added = []
         self.commits = 0
+        self.rollbacks = 0
 
     async def scalar(self, _statement):
         return next(self.values)
@@ -22,6 +23,9 @@ class AgentDatabase:
 
     async def commit(self):
         self.commits += 1
+
+    async def rollback(self):
+        self.rollbacks += 1
 
     async def flush(self):
         for value in self.added:
@@ -127,3 +131,80 @@ async def test_agent_stream_endpoint_emits_tool_trace_and_persists_completion(mo
     finally:
         main.app.dependency_overrides.pop(get_db, None)
         main.app.dependency_overrides.pop(get_context, None)
+
+
+@pytest.mark.asyncio
+async def test_agent_stream_endpoint_persists_failure_after_partial_output(monkeypatch):
+    agent = SimpleNamespace(
+        id="agent-1",
+        tenant_id="tenant-1",
+        project_id="project-1",
+        provider_id="provider-1",
+        enabled=True,
+        knowledge_base_id=None,
+        system_prompt="You are helpful.",
+    )
+    provider = SimpleNamespace(id="provider-1", enabled=True)
+    database = AgentDatabase(agent, provider)
+    context = SimpleNamespace(
+        user_id="user-1",
+        tenant_id="tenant-1",
+        role="operator",
+        custom_permissions=("api:agent:invoke",),
+    )
+    config = SimpleNamespace(agent_type="chat", memory_json={"enabled": False})
+
+    async def override_db():
+        yield database
+
+    async def override_context():
+        return context
+
+    async def no_op(*_args, **_kwargs):
+        return None
+
+    async def fake_tenant_policy(*_args, **_kwargs):
+        return SimpleNamespace(safety_json={})
+
+    async def fake_agent_config(*_args, **_kwargs):
+        return config
+
+    async def broken_stream(*_args, **_kwargs):
+        yield {"type": "token", "text": "partial"}
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(main, "enforce_monthly_budget", no_op)
+    monkeypatch.setattr(main, "require_project_access", no_op)
+    monkeypatch.setattr(main, "tenant_policy", fake_tenant_policy)
+    monkeypatch.setattr(main, "inspect_text", lambda text, _policy: {"blocked": False, "text": text, "reasons": []})
+    monkeypatch.setattr(main, "get_or_create_agent_config", fake_agent_config)
+    monkeypatch.setattr(main, "load_agent_memories", no_op)
+    monkeypatch.setattr(main, "resolve_cost_center", lambda *_args, **_kwargs: _resolved_cost_center())
+    monkeypatch.setattr(main, "stream_agent_loop", broken_stream)
+    monkeypatch.setattr(main, "audit", no_op)
+    monkeypatch.setattr(main, "Redis", FakeRateRedis)
+
+    main.app.dependency_overrides[get_db] = override_db
+    main.app.dependency_overrides[get_context] = override_context
+    try:
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/api/v1/agents/agent-1/chat/stream",
+                json={"message": "find my order", "cost_center": "agent"},
+            )
+
+        assert response.status_code == 200
+        assert "event: token" in response.text
+        assert "event: error" in response.text
+        assert "provider unavailable" in response.text
+        assert any(getattr(item, "event_type", "") == "message_failed" for item in database.added)
+        assert database.commits == 1
+        assert database.rollbacks == 1
+    finally:
+        main.app.dependency_overrides.pop(get_db, None)
+        main.app.dependency_overrides.pop(get_context, None)
+
+
+async def _resolved_cost_center():
+    return "agent"

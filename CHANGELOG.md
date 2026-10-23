@@ -411,3 +411,7 @@
 - `/healthz` 调整为纯存活探针，不因 PostgreSQL 或 Redis 短暂故障误报进程死亡。
 - `/readyz` 现在要求 PostgreSQL 可访问、Alembic 版本处于当前 head `20261023_mcp_approval` 且 Redis 可用；任一依赖不满足时返回 503，并避免向外暴露内部异常细节。
 - GitHub Actions 新增 `deploy/ci/*.sh` 的 `bash -n` 语法校验，避免 smoke、RLS、PITR 脚本在集成阶段才暴露语法错误。
+
+## 2026-10-23：Agent 流式失败闭环回归
+
+- 新增 API/ASGI 级异常路径测试：Agent 已输出部分 token 后，仍会持久化失败用量、`message_failed` 事件和审计记录，并向客户端发送 `error` SSE 事件。
