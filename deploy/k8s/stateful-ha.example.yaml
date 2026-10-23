@@ -9,6 +9,23 @@ spec:
   instances: 3
   storage:
     size: 100Gi
+  # CloudNativePG runs the WAL archiver and base-backup jobs. Replace the
+  # destination and Secret name before applying this reference manifest.
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://REPLACE_WITH_DURABLE_BUCKET/platform-postgres
+      s3Credentials:
+        accessKeyId:
+          name: platform-postgres-object-store
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: platform-postgres-object-store
+          key: ACCESS_SECRET_KEY
+      wal:
+        compression: gzip
+        maxParallel: 2
+      data:
+        compression: gzip
   bootstrap:
     initdb:
       database: platform

@@ -1,0 +1,24 @@
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: deploy/postgres/Dockerfile
+    environment:
+      # Use file:// only for local rehearsal. Production must point at a
+      # separate durable object store, for example s3://bucket/platform-wal.
+      WAL_ARCHIVE_URI: ${WAL_ARCHIVE_URI:-file:///var/lib/postgresql/wal-archive}
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_timeout=60s
+      - -c
+      - archive_command=/usr/local/bin/wal-archive.sh "%p" "%f"
+    volumes:
+      - platform-postgres-wal:/var/lib/postgresql/wal-archive
+
+volumes:
+  platform-postgres-wal:
