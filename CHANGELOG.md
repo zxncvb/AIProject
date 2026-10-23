@@ -378,3 +378,9 @@
 
 - MCP 服务登记新增 `pending/approved/rejected` 审批状态、审批人和审批时间，并通过 Alembic 迁移持久化。
 - 未审批或被拒绝的 MCP 服务不能被测试，也不会进入 Agent 工具白名单；控制台补充审批和拒绝操作。
+## 2026-10-23：后台运行权限隔离
+
+- Worker、GPU Worker、工作流调度、发布投递和公开回调 outbox 统一使用 `ControllerSessionLocal` 与 `platform_controller` 连接，不再使用迁移 owner/admin 连接。
+- Worker 启动改为执行 `validate_controller_startup()`；生产环境会同时校验运行角色非 superuser，以及控制器角色为非 superuser 且显式具备 `BYPASSRLS`。
+- Compose、普通 Kubernetes Worker 和 GPU Worker 均显式注入 `CONTROLLER_DATABASE_URL` 并清空 `DATABASE_ADMIN_URL`；新增静态安全回归测试覆盖该约束。
+

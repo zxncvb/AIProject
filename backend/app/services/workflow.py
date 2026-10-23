@@ -15,7 +15,7 @@ from redis.exceptions import ResponseError
 from sqlalchemy import func, or_, select
 
 from ..config import get_settings
-from ..db import AdminSessionLocal
+from ..db import ControllerSessionLocal
 from ..models import Agent, ApprovalRequest, ComputeUsage, Document, EvaluationJob, GpuLease, ModelProvider, Plugin, Project, PublishDelivery, SandboxRun, Skill, TenantPolicy, Workflow, WorkflowRun, WorkflowSchedule, WorkflowVersion
 from .knowledge import search_chunks
 from .llm import call_chat, call_routed_chat
@@ -39,7 +39,7 @@ class WorkflowCancelled(Exception):
 
 
 async def is_run_cancelled(run_id: str) -> bool:
-    async with AdminSessionLocal() as check_db:
+    async with ControllerSessionLocal() as check_db:
         status = await check_db.scalar(select(WorkflowRun.status).where(WorkflowRun.id == run_id))
         return status == "cancelled"
 
@@ -206,7 +206,7 @@ async def _job_tenant_id(kind: str, resource_id: str) -> str:
     model = model_by_kind.get(kind)
     if not model:
         return ""
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         return str(await db.scalar(select(model.tenant_id).where(model.id == resource_id)) or "")
 
 
@@ -247,7 +247,7 @@ async def execute_index(document_id: str) -> None:
     from ..models import Document, DocumentChunk
     from .vector import upsert_chunks
 
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         document = await db.scalar(select(Document).where(Document.id == document_id))
         if not document:
             return
@@ -279,7 +279,7 @@ async def _provider(db, tenant_id: str, node_config: dict[str, Any]) -> ModelPro
 
 
 async def execute_run(run_id: str) -> None:
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         result = await db.execute(select(WorkflowRun).where(WorkflowRun.id == run_id))
         run = result.scalar_one_or_none()
         if not run or run.status not in {"queued", "running"}:
@@ -335,7 +335,7 @@ async def execute_run(run_id: str) -> None:
 
 
 async def execute_evaluation(job_id: str) -> None:
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         job = await db.scalar(select(EvaluationJob).where(EvaluationJob.id == job_id))
         if not job or job.status not in {"queued", "running"}:
             return
@@ -393,7 +393,7 @@ async def execute_evaluation(job_id: str) -> None:
 
 
 async def execute_sandbox(run_id: str) -> None:
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         row = await db.scalar(select(SandboxRun).where(SandboxRun.id == run_id))
         if not row or row.status not in {"queued", "running"}:
             return
@@ -413,7 +413,7 @@ async def execute_sandbox(run_id: str) -> None:
 
 
 async def reconcile_gpu_leases() -> None:
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         current = now()
         rows = (await db.execute(select(GpuLease).where(GpuLease.status.in_(["allocated", "queued"]), GpuLease.expires_at <= current))).scalars().all()
         for row in rows:
@@ -435,7 +435,7 @@ async def reconcile_gpu_leases() -> None:
 async def dispatch_schedules(redis: Redis) -> None:
     """Create queued runs for due schedules with an atomic next-run advance."""
     current = now()
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         schedules = (await db.execute(select(WorkflowSchedule).where(WorkflowSchedule.active.is_(True), WorkflowSchedule.next_run_at <= current).order_by(WorkflowSchedule.next_run_at).limit(50).with_for_update(skip_locked=True))).scalars().all()
         queued_ids: list[str] = []
         for schedule in schedules:
@@ -472,7 +472,7 @@ async def dispatch_schedules(redis: Redis) -> None:
 async def dispatch_publication_deliveries(redis: Redis) -> None:
     """Drain the database outbox while recovering expired enqueue reservations."""
     current = now()
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         rows = (await db.execute(
             select(PublishDelivery)
             .where(
@@ -495,7 +495,7 @@ async def dispatch_publication_deliveries(redis: Redis) -> None:
         try:
             await enqueue_job("publication_delivery", delivery_id, redis)
         except Exception as exc:
-            async with AdminSessionLocal() as db:
+            async with ControllerSessionLocal() as db:
                 row = await db.scalar(select(PublishDelivery).where(PublishDelivery.id == delivery_id))
                 if row and row.status == "enqueued":
                     row.status = "queued"

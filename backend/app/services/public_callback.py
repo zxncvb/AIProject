@@ -14,7 +14,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
 from ..config import get_settings
-from ..db import AdminSessionLocal
+from ..db import ControllerSessionLocal
 from ..models import PublicCallbackDelivery, utcnow
 
 
@@ -106,7 +106,7 @@ async def deliver_public_callback(callback_url: str, payload: dict[str, Any], *,
 async def _claim_delivery(delivery_id: str) -> PublicCallbackDelivery | None:
     """Claim one due delivery with a lease so multiple workers do not duplicate it."""
     now = utcnow()
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         statement = (
             select(PublicCallbackDelivery)
             .where(
@@ -139,7 +139,7 @@ async def deliver_public_callback_delivery(delivery_id: str) -> dict[str, Any]:
     except Exception as exc:  # validation/config errors must not kill the worker
         result = {"delivered": False, "error": str(exc)[:1000]}
     now = utcnow()
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         current = await db.scalar(select(PublicCallbackDelivery).where(PublicCallbackDelivery.id == row.id))
         if not current:
             return result
@@ -166,7 +166,7 @@ async def enqueue_public_callback_delivery(*, kind: str, run_id: str, tenant_id:
     callback_url = validate_public_callback_url(callback_url)
     if not callback_url:
         return ""
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         row = await db.scalar(
             select(PublicCallbackDelivery).where(
                 PublicCallbackDelivery.tenant_id == tenant_id,
@@ -210,7 +210,7 @@ async def enqueue_public_callback_delivery(*, kind: str, run_id: str, tenant_id:
 async def deliver_due_public_callbacks(limit: int = 20) -> int:
     """Drain due callbacks; stale leases are reclaimable after a worker crash."""
     now = utcnow()
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         rows = (
             await db.execute(
                 select(PublicCallbackDelivery.id)

@@ -11,7 +11,7 @@ import httpx
 from sqlalchemy import select
 
 from ..config import get_settings
-from ..db import AdminSessionLocal
+from ..db import ControllerSessionLocal
 from ..models import PublishBinding, PublishChannel, PublishDelivery
 
 
@@ -38,7 +38,7 @@ def signed_headers(payload: dict, secret: str, timestamp: str) -> dict[str, str]
 
 async def deliver(delivery_id: str) -> None:
     settings = get_settings()
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         result = await db.execute(
             select(PublishDelivery, PublishBinding, PublishChannel)
             .join(PublishBinding, PublishBinding.id == PublishDelivery.binding_id)

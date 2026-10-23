@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import pytest
 from fastapi import HTTPException
@@ -50,6 +51,23 @@ def test_controller_database_identity_is_separate_from_migration_owner():
     assert "BYPASSRLS" in provision
     assert "CONTROLLER_DATABASE_URL" in compose
     assert "POSTGRES_CONTROLLER_PASSWORD" in compose
+
+
+def test_worker_and_background_delivery_paths_do_not_use_admin_database_role():
+    root = Path(__file__).parents[1] / "app"
+    worker_source = (root / "worker.py").read_text(encoding="utf-8")
+    assert "validate_controller_startup" in worker_source
+    assert "AdminSessionLocal" not in worker_source
+    for filename in ("services/workflow.py", "services/public_callback.py", "services/publication.py"):
+        source = (root / filename).read_text(encoding="utf-8")
+        assert "ControllerSessionLocal" in source
+        assert "AdminSessionLocal" not in source
+    compose = (Path(__file__).parents[2] / "docker-compose.yml").read_text(encoding="utf-8")
+    worker_match = re.search(r"\n  worker:\n(?P<body>.*?)(?=\n  [a-z][a-z0-9-]*:\n)", compose, re.DOTALL)
+    assert worker_match is not None
+    worker_block = worker_match.group("body")
+    assert "CONTROLLER_DATABASE_URL" in worker_block
+    assert 'DATABASE_ADMIN_URL: ""' in worker_block
 
 
 def test_public_callback_outbox_has_operational_metrics_and_alerts():

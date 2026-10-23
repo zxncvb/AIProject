@@ -545,3 +545,11 @@ README 中有三处表述高于当前实现，建议在售前材料和验收文�
 | 控制器不在 Compose | `docker-compose.yml` 无 `sandbox-controller` / `application-controller` |
 | CD 先 apply 后迁移 | `.github/workflows/cd.yml:56-60` |
 | 测试仅 22 个单元测试 | `backend/tests/*.py` |
+---
+
+## 2026-10-23 追加复核：后台运行权限隔离
+
+- Worker、GPU Worker、工作流调度、发布投递和公开回调 outbox 已统一使用 `ControllerSessionLocal` 与 `platform_controller` 连接，不再使用迁移 owner/admin 连接。
+- Worker 启动执行 `validate_controller_startup()`，生产环境同时校验运行角色非 superuser，以及控制器角色为非 superuser 且显式具备 `BYPASSRLS`。
+- Compose、普通 Kubernetes Worker 和 GPU Worker 均显式注入 `CONTROLLER_DATABASE_URL` 并清空 `DATABASE_ADMIN_URL`。
+- 验证结果：后端 `85 passed`，服务层覆盖率 `41.76%`（40% 门禁通过），Python 编译通过，`docker compose config --quiet` 通过，`kubectl kustomize deploy/k8s` 通过；真实 Docker/PostgreSQL/Kubernetes 运行验收仍需目标环境。

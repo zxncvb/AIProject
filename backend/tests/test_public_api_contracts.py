@@ -249,7 +249,7 @@ async def test_public_callback_outbox_requeues_failed_delivery(monkeypatch):
             return None
 
     sessions = iter([Session(), Session()])
-    monkeypatch.setattr(public_callback, "AdminSessionLocal", lambda: next(sessions))
+    monkeypatch.setattr(public_callback, "ControllerSessionLocal", lambda: next(sessions))
 
     async def failed_delivery(_url, _payload, **_kwargs):
         return {"delivered": False, "status_code": 503, "error": "temporary outage"}
@@ -298,7 +298,7 @@ async def test_public_callback_outbox_reuses_row_after_concurrent_unique_conflic
         delivered.append(delivery_id)
         return {"delivered": False}
 
-    monkeypatch.setattr(public_callback, "AdminSessionLocal", lambda: Session())
+    monkeypatch.setattr(public_callback, "ControllerSessionLocal", lambda: Session())
     monkeypatch.setattr(public_callback, "validate_public_callback_url", lambda value: value)
     monkeypatch.setattr(public_callback, "deliver_public_callback_delivery", fake_deliver)
     result = await public_callback.enqueue_public_callback_delivery(

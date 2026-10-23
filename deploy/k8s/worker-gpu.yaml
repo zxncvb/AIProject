@@ -18,6 +18,19 @@ spec:
           image: enterprise-ai-platform/backend:latest
           command: ["python", "-m", "app.worker"]
           envFrom: [{secretRef: {name: enterprise-ai-secrets}}]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: enterprise-ai-secrets
+                  key: CONTROLLER_DATABASE_URL
+            - name: DATABASE_ADMIN_URL
+              value: ""
+            - name: CONTROLLER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: enterprise-ai-secrets
+                  key: CONTROLLER_DATABASE_URL
           resources:
             requests:
               cpu: "1"
