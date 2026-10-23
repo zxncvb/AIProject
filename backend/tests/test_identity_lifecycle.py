@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from fastapi import HTTPException
 import pytest
 
 from app import main
@@ -30,6 +31,34 @@ class MemberDatabase:
 
     async def delete(self, _value):
         return None
+
+
+class LoginResult:
+    def __init__(self, value):
+        self.value = value
+
+    def first(self):
+        return self.value
+
+
+class LoginDatabase:
+    def __init__(self, user, membership, tenant):
+        self.user = user
+        self.row = (membership, tenant)
+        self.added = []
+        self.committed = False
+
+    async def scalar(self, _statement):
+        return self.user
+
+    async def execute(self, _statement):
+        return LoginResult(self.row)
+
+    def add(self, value):
+        self.added.append(value)
+
+    async def commit(self):
+        self.committed = True
 
 
 @pytest.mark.asyncio
@@ -70,4 +99,31 @@ async def test_member_removal_revokes_existing_sessions(monkeypatch):
     assert result["removed"] is True
     assert revoked == ["user-2"]
     assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_password_login_requires_verified_email(monkeypatch):
+    user = User(id="user-3", email="unverified@example.com", password_hash=main.hash_password("correct-password"), email_verified=False)
+    membership = SimpleNamespace(role="viewer")
+    tenant = SimpleNamespace(id="tenant-1", name="Acme", slug="acme")
+    db = LoginDatabase(user, membership, tenant)
+
+    async def unlocked(_email):
+        return False
+
+    monkeypatch.setattr(main, "is_login_locked", unlocked)
+    monkeypatch.setattr(main, "clear_login_failures", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(HTTPException) as error:
+        await main.login(
+            SimpleNamespace(email=user.email, password="correct-password", tenant_slug=None, mfa_code=None),
+            SimpleNamespace(),
+            None,
+            db,
+        )
+
+    assert error.value.status_code == 403
+    assert error.value.detail["code"] == "email_verification_required"
+    assert db.committed is True
+    assert any(getattr(item, "action", "") == "auth.login.blocked" for item in db.added)
 

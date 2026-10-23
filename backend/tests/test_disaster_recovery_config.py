@@ -63,7 +63,7 @@ def test_alembic_migrations_have_one_deployable_head():
         parent = values.get("down_revision")
         parents.update(parent if isinstance(parent, tuple) else ({parent} if parent else set()))
 
-    assert revisions - parents == {"20261023_mcp_approval"}
+    assert revisions - parents == {"20261024_email_verification"}
 
 
 def test_audit_events_are_append_only_after_hash_chain_migration():

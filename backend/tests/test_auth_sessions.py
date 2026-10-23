@@ -43,6 +43,7 @@ def clear_fallback_state():
         auth_sessions._fallback_revoked,
         auth_sessions._fallback_user_revoked,
         auth_sessions._fallback_password_resets,
+        auth_sessions._fallback_email_verifications,
     ):
         values.clear()
     yield
@@ -52,6 +53,7 @@ def clear_fallback_state():
         auth_sessions._fallback_revoked,
         auth_sessions._fallback_user_revoked,
         auth_sessions._fallback_password_resets,
+        auth_sessions._fallback_email_verifications,
     ):
         values.clear()
 
@@ -91,4 +93,11 @@ async def test_revocation_and_password_reset_fallbacks_are_one_time(unavailable_
     await auth_sessions.revoke_user_sessions("user-1")
     assert await auth_sessions.is_token_revoked({"sub": "user-1", "iat": time.time() - 1}) is True
     assert await auth_sessions.is_token_revoked({"sub": "user-1", "iat": time.time() + 1}) is False
+
+
+@pytest.mark.asyncio
+async def test_email_verification_fallback_is_one_time(unavailable_redis):
+    token = await auth_sessions.create_email_verification("user-1", "tenant-1", 60)
+    assert await auth_sessions.consume_email_verification(token) == {"user_id": "user-1", "tenant_id": "tenant-1"}
+    assert await auth_sessions.consume_email_verification(token) is None
 

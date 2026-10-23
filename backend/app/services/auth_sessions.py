@@ -16,6 +16,7 @@ _fallback_locks: dict[str, float] = {}
 _fallback_revoked: dict[str, float] = {}
 _fallback_user_revoked: dict[str, float] = {}
 _fallback_password_resets: dict[str, tuple[str, float]] = {}
+_fallback_email_verifications: dict[str, tuple[str, float]] = {}
 
 
 def _identity(value: str) -> str:
@@ -24,6 +25,10 @@ def _identity(value: str) -> str:
 
 def _password_reset_key(token: str) -> str:
     return f"auth:password-reset:{hashlib.sha256(token.encode()).hexdigest()}"
+
+
+def _email_verification_key(token: str) -> str:
+    return f"auth:email-verification:{hashlib.sha256(token.encode()).hexdigest()}"
 
 
 async def create_password_reset(user_id: str, tenant_id: str, ttl_seconds: int) -> str:
@@ -57,6 +62,50 @@ async def consume_password_reset(raw_token: str) -> dict | None:
                 payload = stored[0]
     except Exception:
         stored = _fallback_password_resets.pop(key, None)
+        if not stored or stored[1] <= time.time():
+            return None
+        payload = stored[0]
+    finally:
+        await redis.aclose()
+    if not payload:
+        return None
+    try:
+        return json.loads(payload)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+async def create_email_verification(user_id: str, tenant_id: str, ttl_seconds: int) -> str:
+    raw_token = secrets.token_urlsafe(48)
+    payload = json.dumps({"user_id": user_id, "tenant_id": tenant_id}, separators=(",", ":"))
+    key = _email_verification_key(raw_token)
+    redis = Redis.from_url(get_settings().redis_url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
+    try:
+        await redis.setex(key, max(60, ttl_seconds), payload)
+    except Exception:
+        _fallback_email_verifications[key] = (payload, time.time() + max(60, ttl_seconds))
+    finally:
+        await redis.aclose()
+    return raw_token
+
+
+async def consume_email_verification(raw_token: str) -> dict | None:
+    key = _email_verification_key(raw_token)
+    redis = Redis.from_url(get_settings().redis_url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
+    stored = None
+    try:
+        try:
+            payload = await redis.getdel(key)
+        except Exception:
+            payload = await redis.get(key)
+            if payload:
+                await redis.delete(key)
+        if not payload:
+            stored = _fallback_email_verifications.pop(key, None)
+            if stored and stored[1] > time.time():
+                payload = stored[0]
+    except Exception:
+        stored = _fallback_email_verifications.pop(key, None)
         if not stored or stored[1] <= time.time():
             return None
         payload = stored[0]

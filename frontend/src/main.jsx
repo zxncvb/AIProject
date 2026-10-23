@@ -71,7 +71,7 @@ function Login({ onLogin }) {
     <label>账号<input value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" /></label>
     <label>密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" /></label>
     <label>多因素验证码 <span className="label-hint">启用 MFA 后填写</span><input inputMode="numeric" value={mfaCode} onChange={(e) => setMfaCode(e.target.value)} placeholder="6 位验证码" /></label>
-    {error && <div className="error">{error}</div>}<button className="primary full" type="submit">登录控制台</button><button type="button" onClick={() => window.location.assign("/reset-password")}>忘记密码</button>
+    {error && <div className="error">{error}</div>}<button className="primary full" type="submit">登录控制台</button><button type="button" onClick={() => window.location.assign("/reset-password")}>忘记密码</button><button type="button" onClick={() => window.location.assign("/verify-email")}>验证邮箱</button>
   </form></main>;
 }
 
@@ -97,6 +97,29 @@ function PasswordReset() {
     } catch (err) { setError(errorText(err, "重置令牌无效或已过期")); }
   }
   return <main className="login-page"><section className="login-card"><div className="brand-mark">AI</div><div className="login-kicker">ENTERPRISE AI PLATFORM</div><h1>重置密码</h1><form onSubmit={request}><label>账号邮箱<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label><button className="primary full" type="submit">发送重置链接</button></form><form onSubmit={confirm}><label>重置令牌<input value={token} onChange={(e) => setToken(e.target.value)} minLength="32" required /></label><label>新密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength="12" required /></label><button className="primary full" type="submit">确认新密码</button></form>{message && <div className="notice">{message}</div>}{error && <div className="error">{error}</div>}<button type="button" onClick={() => window.location.assign("/")}>返回登录</button></section></main>;
+}
+
+function EmailVerification() {
+  const [email, setEmail] = useState("");
+  const [token, setToken] = useState(() => new URLSearchParams(window.location.search).get("token") || "");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  async function request(event) {
+    event.preventDefault(); setError(""); setMessage("");
+    try {
+      const { data } = await api.post("/api/auth/email-verification/request", { email });
+      if (data.debug_token) setToken(data.debug_token);
+      setMessage("如果账号存在，验证链接已发送；开发环境可直接使用返回的令牌。");
+    } catch (err) { setError(errorText(err, "验证邮件请求失败")); }
+  }
+  async function confirm(event) {
+    event.preventDefault(); setError(""); setMessage("");
+    try {
+      await api.post("/api/auth/email-verification/confirm", { token });
+      setMessage("邮箱验证成功，请返回登录。");
+    } catch (err) { setError(errorText(err, "邮箱验证令牌无效或已过期")); }
+  }
+  return <main className="login-page"><section className="login-card"><div className="brand-mark">AI</div><div className="login-kicker">ENTERPRISE AI PLATFORM</div><h1>验证邮箱</h1><form onSubmit={request}><label>账号邮箱<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label><button className="primary full" type="submit">发送验证链接</button></form><form onSubmit={confirm}><label>验证令牌<input value={token} onChange={(e) => setToken(e.target.value)} minLength="32" required /></label><button className="primary full" type="submit">确认邮箱</button></form>{message && <div className="notice">{message}</div>}{error && <div className="error">{error}</div>}<button type="button" onClick={() => window.location.assign("/")}>返回登录</button></section></main>;
 }
 
 function PublicApplication({ tenantSlug, appSlug }) {
@@ -343,7 +366,7 @@ function ConsoleApp() {
   async function refresh() { try { const responses = await Promise.all(["/api/me", "/api/projects", "/api/agents", "/api/applications", "/api/workflows", "/api/models", "/api/knowledge-bases", "/api/skills", "/api/plugins", "/api/mcp-servers", "/api/runs", "/api/audit"].map((path) => api.get(path))); const [meR, projects, agents, applications, workflows, models, kbs, skills, plugins, mcp, runs, audit] = responses; setMe(meR.data); setData({ projects: projects.data, agents: agents.data, applications: applications.data, workflows: workflows.data, models: models.data, kbs: kbs.data, skills: skills.data, plugins: plugins.data, mcp: mcp.data, runs: runs.data, audit: audit.data }); } catch (err) { if (err.response?.status === 401) { localStorage.removeItem("eai_session"); setLoggedIn(false); } } }
   useEffect(() => { const params = new URLSearchParams(window.location.search); if (window.location.pathname === "/auth/oidc/callback" && params.get("code") && params.get("state")) { api.post("/api/auth/oidc/callback", { code: params.get("code"), state: params.get("state") }, { headers: { "X-Browser-Session": "1" } }).then(() => { localStorage.setItem("eai_session", "1"); window.history.replaceState({}, "", "/"); setLoggedIn(true); }).catch(() => { window.history.replaceState({}, "", "/"); }); } }, []);
   useEffect(() => { if (loggedIn) refresh(); }, [loggedIn]);
-  if (!loggedIn) return window.location.pathname === "/reset-password" ? <PasswordReset /> : <Login onLogin={() => setLoggedIn(true)}/>;
+  if (!loggedIn) return window.location.pathname === "/reset-password" ? <PasswordReset /> : window.location.pathname === "/verify-email" ? <EmailVerification /> : <Login onLogin={() => setLoggedIn(true)}/>;
   const content = page === "overview" ? <Overview data={data} go={setPage}/> : page === "workspaces" ? <WorkspaceCenter me={me}/> : page === "agents" ? <Agents data={data} refresh={refresh}/> : page === "agent-studio" ? <AgentStudio data={data}/> : page === "agent-resources" ? <AgentResources data={data}/> : page === "agent-lifecycle" ? <AgentLifecycle data={data}/> : page === "applications" ? <ApplicationsCenter api={api} data={data} refresh={refresh}/> : page === "workflows" ? <Workflows data={data} refresh={refresh}/> : page === "workflow-ops" ? <WorkflowGovernance data={data}/> : page === "models" ? <Models data={data} refresh={refresh}/> : page === "model-experience" ? <ModelExperience api={api} data={data}/> : page === "model-square" ? <ModelSquare data={data}/> : page === "model-detail" ? <ModelDetail data={data}/> : page === "knowledge" ? <Knowledge data={data} refresh={refresh}/> : page === "kb-assets" ? <KnowledgeAssets data={data}/> : page === "databases" ? <><DatabaseCenter data={data}/><div className="page"><DatabasePolicyEditor api={api} role={me?.role}/></div></> : page === "prompts" ? <PromptCenter/> : page === "quick-chat" ? <QuickChat data={data}/> : page === "extensions" ? <ExtensionsControl data={data} refresh={refresh}/> : page === "explore" ? <MarketCenter/> : page === "runs" ? <RunsCenter api={api}/> : page === "members" ? <Members me={me}/> : page === "publishing" ? <PublishingCenter data={data}/> : page === "approvals" ? <ApprovalCenter/> : page === "production-governance" ? <ProductionGovernance api={api} role={me?.role}/> : page === "security" ? <SecurityCenter me={me}/> : page === "admin" ? <PlatformConsole/> : page === "platform-resources" ? <AdminResources/> : page === "account" ? <AccountCenter me={me}/> : <Audit data={data}/>;
   return <Layout me={me} page={page} setPage={setPage} onLogout={() => { api.post("/api/auth/logout", {}).catch(() => {}).finally(() => { localStorage.removeItem("eai_session"); setLoggedIn(false); }); }}>{content}</Layout>;
 }

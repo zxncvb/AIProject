@@ -444,3 +444,9 @@
 
 - 前端新增 `npm run dev` 脚本和 Vite 本地代理，可将 `/api`、`/public`、`/healthz`、`/readyz` 转发到本机后端。
 - 新增同步 Agent `/chat` 提示词执行回归测试；后端全量测试 `104 passed`，服务层覆盖率 `42.31%`，前端测试与构建通过。
+
+## 2026-10-24：邮箱验证生命周期闭环
+
+- 新增 `email_verified` 字段、Alembic 迁移、一次性 Redis/本地降级令牌，以及 `/api/auth/email-verification/request` 和 `/confirm` 接口。
+- 密码登录现在拒绝未验证邮箱并写入审计；密码重置、OIDC、LDAP、SCIM 和管理员直接创建账号会正确更新验证状态；前端新增邮箱验证页。
+- 本批后端全量测试 `106 passed`，服务层覆盖率 `42.90%`。

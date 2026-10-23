@@ -41,6 +41,15 @@ class PasswordResetConfirm(BaseModel):
     new_password: str = Field(min_length=12, max_length=200)
 
 
+class EmailVerificationRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    tenant_slug: str | None = None
+
+
+class EmailVerificationConfirm(BaseModel):
+    token: str = Field(min_length=32, max_length=256)
+
+
 class MFACodeRequest(BaseModel):
     code: str = Field(min_length=6, max_length=8)
 

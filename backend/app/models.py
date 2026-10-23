@@ -27,6 +27,7 @@ class User(Base):
     display_name: Mapped[str] = mapped_column(String(120), default="")
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     mfa_secret_encrypted: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

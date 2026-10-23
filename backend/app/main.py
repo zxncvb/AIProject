@@ -116,6 +116,8 @@ from .schemas import (
     ModelTestRequest,
     OIDCCallbackRequest,
     OIDCStartRequest,
+    EmailVerificationConfirm,
+    EmailVerificationRequest,
     PasswordChangeRequest,
     PasswordResetConfirm,
     PasswordResetRequest,
@@ -175,7 +177,7 @@ from .schemas import (
     ApiKeyCreate,
 )
 from .security import create_access_token, create_refresh_token, decode_access_token, decode_refresh_token, decrypt_secret, encrypt_secret, hash_password, secret_backend_status, verify_password
-from .services.auth_sessions import clear_login_failures, consume_password_reset, create_password_reset, is_login_locked, is_token_revoked, record_login_failure, revoke_token, revoke_user_sessions
+from .services.auth_sessions import clear_login_failures, consume_email_verification, consume_password_reset, create_email_verification, create_password_reset, is_login_locked, is_token_revoked, record_login_failure, revoke_token, revoke_user_sessions
 from .services.crypto import checksum, chunk_text
 from .services.knowledge import normalize_metadata_filter, search_chunks
 from .services.identity import BUILTIN_ROLES, mapped_role, parse_role_mapping
@@ -224,7 +226,7 @@ logger = logging.getLogger("enterprise_ai_platform")
 
 # Keep readiness tied to the schema that the running application was built
 # against.  This must be updated together with every new Alembic head.
-EXPECTED_ALEMBIC_HEAD = "20261023_mcp_approval"
+EXPECTED_ALEMBIC_HEAD = "20261024_email_verification"
 
 PERMISSION_CATALOG = [
     {"key": "workspace.read", "name": "查看工作区"},
@@ -593,7 +595,7 @@ async def bootstrap() -> None:
             await db.flush()
         user = await db.scalar(select(User).where(User.email == settings.bootstrap_admin_email))
         if not user:
-            user = User(email=settings.bootstrap_admin_email, display_name="平台管理员", password_hash=hash_password(settings.bootstrap_admin_password))
+            user = User(email=settings.bootstrap_admin_email, display_name="平台管理员", password_hash=hash_password(settings.bootstrap_admin_password), email_verified=True)
             db.add(user)
             await db.flush()
         await provision_tenant_defaults(db, tenant, user.id)
@@ -842,8 +844,12 @@ async def login(body: LoginRequest, response: Response, browser_session: str | N
     row = (await db.execute(stmt)).first()
     if not row:
         raise HTTPException(status_code=403, detail="用户没有可访问的租户")
-    await clear_login_failures(body.email)
     membership, tenant = row
+    if not getattr(user, "email_verified", True):
+        await audit_login(db, user, tenant.id, "auth.login.blocked", {"reason": "email_not_verified"})
+        await db.commit()
+        raise HTTPException(status_code=403, detail={"code": "email_verification_required", "message": "请先验证邮箱后再登录"})
+    await clear_login_failures(body.email)
     await audit_login(db, user, tenant.id, "auth.login.success", {"method": "password"})
     await db.commit()
     token = create_access_token(user.id, tenant.id, membership.role)
@@ -893,6 +899,67 @@ async def request_password_reset(body: PasswordResetRequest, db: AsyncSession = 
     return response
 
 
+@app.post("/api/auth/email-verification/request")
+async def request_email_verification(body: EmailVerificationRequest, db: AsyncSession = Depends(get_admin_db)):
+    settings = get_settings()
+    email = body.email.strip().lower()
+    stmt = (
+        select(User, Membership, Tenant)
+        .join(Membership, (Membership.user_id == User.id) & (Membership.is_active.is_(True)))
+        .join(Tenant, (Tenant.id == Membership.tenant_id) & (Tenant.is_active.is_(True)))
+        .where(User.email == email, User.is_active.is_(True))
+        .order_by(Membership.created_at)
+    )
+    if body.tenant_slug:
+        stmt = stmt.where(Tenant.slug == body.tenant_slug.strip().lower())
+    row = (await db.execute(stmt)).first()
+    debug_token = None
+    if row:
+        user, _membership, tenant = row
+        if not user.email_verified:
+            token = await create_email_verification(user.id, tenant.id, settings.password_reset_ttl_minutes * 60)
+            verify_url = f"{settings.frontend_base_url.rstrip('/')}/verify-email?token={token}"
+            if settings.smtp_host and settings.smtp_from:
+                try:
+                    await send_email(
+                        user.email,
+                        "验证企业 AI 平台邮箱",
+                        f"请在 {settings.password_reset_ttl_minutes} 分钟内打开以下链接验证邮箱：\n\n{verify_url}",
+                    )
+                except Exception:
+                    logger.exception("email_verification_delivery_failed", extra={"tenant_id": tenant.id, "user_id": user.id})
+            elif settings.app_env.lower() in {"development", "dev", "test", "testing"}:
+                debug_token = token
+            await audit_login(db, user, tenant.id, "auth.email_verification.request", {"email_delivery": bool(settings.smtp_host and settings.smtp_from)})
+            await db.commit()
+    response = {"accepted": True, "expires_in": settings.password_reset_ttl_minutes * 60}
+    if debug_token:
+        response["debug_token"] = debug_token
+    return response
+
+
+@app.post("/api/auth/email-verification/confirm")
+async def confirm_email_verification(body: EmailVerificationConfirm, db: AsyncSession = Depends(get_admin_db)):
+    payload = await consume_email_verification(body.token)
+    if not payload:
+        raise HTTPException(status_code=400, detail="邮箱验证令牌无效或已过期")
+    user_id = str(payload.get("user_id") or "")
+    tenant_id = str(payload.get("tenant_id") or "")
+    row = (await db.execute(
+        select(User, Tenant, Membership)
+        .join(Membership, (Membership.user_id == User.id) & (Membership.is_active.is_(True)))
+        .join(Tenant, (Tenant.id == Membership.tenant_id) & (Tenant.is_active.is_(True)))
+        .where(User.id == user_id, Tenant.id == tenant_id, User.is_active.is_(True))
+    )).first()
+    if not row:
+        raise HTTPException(status_code=400, detail="邮箱验证令牌无效或用户已停用")
+    user, tenant, _membership = row
+    user.email_verified = True
+    await audit_login(db, user, tenant.id, "auth.email_verification.confirm", {})
+    await db.commit()
+    return {"verified": True, "email": user.email}
+
+
 @app.post("/api/auth/password-reset/confirm")
 async def confirm_password_reset(body: PasswordResetConfirm, db: AsyncSession = Depends(get_admin_db)):
     payload = await consume_password_reset(body.token)
@@ -910,6 +977,7 @@ async def confirm_password_reset(body: PasswordResetConfirm, db: AsyncSession = 
         raise HTTPException(status_code=400, detail="密码重置令牌无效或用户已停用")
     user, tenant, _membership = row
     user.password_hash = hash_password(body.new_password)
+    user.email_verified = True
     await revoke_user_sessions(user.id)
     await audit_login(db, user, tenant.id, "auth.password_reset.confirm", {})
     await db.commit()
@@ -1017,6 +1085,7 @@ async def ldap_login(body: LDAPLoginRequest, response: Response, browser_session
         if not settings.ldap_auto_provision:
             raise HTTPException(status_code=403, detail="LDAP 用户已停用")
         membership.is_active = True
+    user.email_verified = True
     await db.commit()
     token = create_access_token(user.id, tenant.id, membership.role)
     refresh_token = create_refresh_token(user.id, tenant.id, membership.role)
@@ -1077,6 +1146,7 @@ async def oidc_callback(body: OIDCCallbackRequest, response: Response, browser_s
         user = User(email=email, display_name=display_name, password_hash=hash_password(secrets.token_urlsafe(32)))
         db.add(user)
         await db.flush()
+    user.email_verified = True
     membership = await db.scalar(select(Membership).where(Membership.user_id == user.id, Membership.tenant_id == tenant.id))
     if not membership:
         if not settings.oidc_auto_provision:
@@ -1106,7 +1176,7 @@ async def oidc_callback(body: OIDCCallbackRequest, response: Response, browser_s
 
 @app.get("/api/me")
 async def me(ctx: Context):
-    return {"user": {"id": ctx.user.id, "email": ctx.user.email, "display_name": ctx.user.display_name, "mfa_enabled": ctx.user.mfa_enabled}, "tenant": {"id": ctx.tenant.id, "name": ctx.tenant.name, "slug": ctx.tenant.slug}, "role": ctx.role}
+    return {"user": {"id": ctx.user.id, "email": ctx.user.email, "display_name": ctx.user.display_name, "email_verified": getattr(ctx.user, "email_verified", True), "mfa_enabled": ctx.user.mfa_enabled}, "tenant": {"id": ctx.tenant.id, "name": ctx.tenant.name, "slug": ctx.tenant.slug}, "role": ctx.role}
 
 
 @app.post("/api/me/password")
@@ -1373,7 +1443,7 @@ async def scim_create_user(tenant_slug: str, body: ScimUserCreate, authorization
     user = await db.scalar(select(User).where(User.email == email))
     if user:
         raise HTTPException(status_code=409, detail="SCIM 用户已存在")
-    user = User(email=email, display_name=body.displayName or email, password_hash=hash_password(secrets.token_urlsafe(32)), is_active=True)
+    user = User(email=email, display_name=body.displayName or email, password_hash=hash_password(secrets.token_urlsafe(32)), is_active=True, email_verified=True)
     db.add(user)
     await db.flush()
     role = "viewer"
@@ -1656,6 +1726,7 @@ async def create_member(body: MemberCreate, ctx: AdminContext, db: AsyncSession 
         user = User(email=body.email.lower().strip(), display_name=body.display_name, password_hash=hash_password(body.password))
         db.add(user)
         await db.flush()
+    user.email_verified = True
     membership = await db.scalar(select(Membership).where(Membership.user_id == user.id, Membership.tenant_id == ctx.tenant_id))
     if membership and membership.is_active:
         raise HTTPException(status_code=409, detail="该用户已经是当前租户成员")
