@@ -38,6 +38,15 @@ def test_tool_rate_limit_key_is_scoped_to_tenant_actor_and_tool():
     assert agent_runtime.tool_rate_limit_key("tenant-a", "user-1", "lookup") != agent_runtime.tool_rate_limit_key("tenant-a", "user-2", "lookup")
 
 
+def test_agent_type_contract_rejects_legacy_execution_labels():
+    assert agent_runtime.validate_agent_type("chat") == "chat"
+    assert agent_runtime.validate_agent_type("chatflow") == "chatflow"
+    with pytest.raises(ValueError, match="workflow"):
+        agent_runtime.validate_agent_type("workflow")
+    with pytest.raises(ValueError, match="a2a"):
+        agent_runtime.validate_agent_type("a2a")
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_executes_tool_then_sends_tool_result_back(monkeypatch):
     bound = agent_runtime.BoundTool("plugin_p1_lookup", "lookup", "plugin", "p1", "Orders")

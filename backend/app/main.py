@@ -181,7 +181,7 @@ from .services.identity import BUILTIN_ROLES, mapped_role, parse_role_mapping
 from .services.ldap_auth import LDAPError, authenticate as ldap_authenticate
 from .services.llm import call_chat, call_routed_chat
 from .services.mailer import send_email
-from .services.agent_runtime import run_agent_loop, stream_agent_loop
+from .services.agent_runtime import run_agent_loop, stream_agent_loop, validate_agent_type
 from .services.oidc import OIDCError, create_authorization_url, exchange_code
 from .services.observability import application_deployment_failed, approval_pending, job_dead_messages, job_queue_messages, metrics_payload, publication_failed, setup_telemetry
 from .services.rate_limit import allow_local
@@ -2686,7 +2686,12 @@ async def import_agent(body: dict[str, Any], ctx: EditorContext, db: AsyncSessio
     db.add(row)
     await db.flush()
     config = body.get("config") if isinstance(body.get("config"), dict) else {}
-    db.add(AgentConfig(tenant_id=ctx.tenant_id, agent_id=row.id, workspace_id=project.workspace_id, agent_type=str(config.get("agent_type") or "chat"), prompt_mode=str(config.get("prompt_mode") or "normal"), prompt_template=str(config.get("prompt_template") or row.system_prompt), variables_json=config.get("variables") or [], memory_json=config.get("memory") or {}, capabilities_json=config.get("capabilities") or {}, experience_json=config.get("experience") or {}, safety_json=config.get("safety") or {}))
+    try:
+        agent_type = validate_agent_type(config.get("agent_type"))
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=422, detail={"code": "agent_type_not_supported", "message": str(exc)}) from exc
+    db.add(AgentConfig(tenant_id=ctx.tenant_id, agent_id=row.id, workspace_id=project.workspace_id, agent_type=agent_type, prompt_mode=str(config.get("prompt_mode") or "normal"), prompt_template=str(config.get("prompt_template") or row.system_prompt), variables_json=config.get("variables") or [], memory_json=config.get("memory") or {}, capabilities_json=config.get("capabilities") or {}, experience_json=config.get("experience") or {}, safety_json=config.get("safety") or {}))
     await audit(db, ctx, "agent.import", "agent", row.id, {"source_slug": payload.get("slug")})
     await db.commit()
     return {"id": row.id, "name": row.name, "slug": row.slug, "version": row.version, "imported": True}
@@ -2900,6 +2905,7 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
     started = time.perf_counter()
     config = await get_or_create_agent_config(db, ctx, agent)
+    require_supported_agent_type(config)
     memories = await load_agent_memories(db, ctx, agent.id, config)
     if memories:
         messages[0]["content"] += "\n\nLong-term user memory:\n" + "\n".join(f"- {item.content}" for item in memories)
@@ -2947,6 +2953,7 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
     history = (conversation.messages_json if conversation else body.conversation)[-20:]
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
     config = await get_or_create_agent_config(db, ctx, agent)
+    require_supported_agent_type(config)
     memories = await load_agent_memories(db, ctx, agent.id, config)
     if memories:
         messages[0]["content"] += "\n\nLong-term user memory:\n" + "\n".join(f"- {item.content}" for item in memories)
@@ -4334,6 +4341,16 @@ async def get_or_create_agent_config(db: AsyncSession, ctx: RequestContext, agen
     return config
 
 
+def require_supported_agent_type(config: AgentConfig) -> str:
+    try:
+        return validate_agent_type(config.agent_type)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "agent_type_not_supported", "message": str(exc)},
+        ) from exc
+
+
 @app.get("/api/agents/{agent_id}/config")
 async def get_agent_config(agent_id: str, ctx: Context, db: AsyncSession = Depends(get_db)):
     agent = await db.scalar(select(Agent).where(Agent.id == agent_id, Agent.tenant_id == ctx.tenant_id))
@@ -4379,6 +4396,7 @@ async def publish_agent(agent_id: str, body: AgentPublishRequest, ctx: EditorCon
         raise HTTPException(status_code=404, detail="智能体不存在")
     await require_project_access(db, ctx, agent.project_id, write=True)
     config = await get_or_create_agent_config(db, ctx, agent)
+    require_supported_agent_type(config)
     version = body.version or (agent.version + 1)
     if await db.scalar(select(AgentVersion).where(AgentVersion.agent_id == agent.id, AgentVersion.version == version)):
         raise HTTPException(status_code=409, detail="智能体版本已存在")

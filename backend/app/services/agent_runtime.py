@@ -22,6 +22,22 @@ from .rate_limit import allow_local
 
 MAX_TOOL_RESULT_CHARS = 12000
 MAX_TOOL_ATTEMPTS = 2
+SUPPORTED_AGENT_TYPES = frozenset({"chat", "chatflow"})
+
+
+def validate_agent_type(agent_type: str | None) -> str:
+    """Return a supported Agent type or fail closed for legacy labels.
+
+    Workflow and A2A are separate platform assets with their own execution
+    endpoints.  They must not silently fall through to the chat runtime.
+    """
+    normalized = str(agent_type or "chat").strip().lower()
+    if normalized not in SUPPORTED_AGENT_TYPES:
+        raise ValueError(
+            f"Agent 类型 {normalized!r} 暂不支持对话执行；请使用 chat/chatflow，"
+            "workflow 请从工作流入口运行，a2a 请从发布通道入口调用"
+        )
+    return normalized
 
 
 class ToolRateLimitedError(RuntimeError):

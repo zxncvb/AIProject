@@ -439,7 +439,7 @@ class OrganizationCreate(BaseModel):
 
 
 class AgentConfigUpdate(BaseModel):
-    agent_type: str = Field(default="chat", pattern=r"^(chat|chatflow|workflow|a2a)$")
+    agent_type: str = Field(default="chat", pattern=r"^(chat|chatflow)$")
     workspace_id: str | None = None
     logo_url: str = ""
     prompt_mode: str = "normal"
