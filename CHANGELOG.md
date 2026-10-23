@@ -257,3 +257,7 @@
 ### 灾备交付链补强
 
 - 灾备演练支持 `DR_BACKUP_IMAGE` 指定生产备份镜像；Kubernetes 备份 CronJob 接入可选的 `BACKUP_S3_URI` 异地对象存储配置，Secret 示例同步补充 WAL/备份归档 URI。
+
+### Agent 流式失败审计补强
+
+- Agent SSE 在模型或工具异常且已经输出部分内容时，会落库部分 Token、`message_failed` 事件和失败审计，再向客户端发送 `error` 事件，避免计费与审计记录丢失。

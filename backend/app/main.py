@@ -2926,6 +2926,48 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
     return {"agent_id": agent.id, "event_id": event.id, "conversation_id": conversation.id, "text": result["text"], "usage": result.get("usage", {}), "tool_trace": result.get("tool_trace", []), "tool_rounds": result.get("tool_rounds", 0)}
 
 
+async def persist_agent_stream_failure(
+    db: AsyncSession,
+    ctx: RequestContext,
+    agent: Agent,
+    *,
+    cost_center: str,
+    started: float,
+    exc: Exception,
+    stream_usage: dict[str, int],
+    stream_text: str,
+    stream_trace: list[dict[str, Any]],
+) -> None:
+    """Persist partial stream usage and an auditable failure before emitting SSE error."""
+    failed_tokens = int(stream_usage.get("total_tokens", 0))
+    db.add(ComputeUsage(tenant_id=ctx.tenant_id, cost_center=cost_center, tokens=failed_tokens))
+    db.add(
+        AgentEvent(
+            tenant_id=ctx.tenant_id,
+            agent_id=agent.id,
+            user_id=ctx.user_id,
+            event_type="message_failed",
+            tokens=failed_tokens,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            detail_json={
+                "stream": True,
+                "error": str(exc)[:1000],
+                "partial_text_chars": len(stream_text),
+                "tool_trace": stream_trace,
+            },
+        )
+    )
+    await audit(
+        db,
+        ctx,
+        "agent.chat.stream.failed",
+        "agent",
+        agent.id,
+        {"tokens": failed_tokens, "error": str(exc)[:1000], "partial_text_chars": len(stream_text), "tool_trace": stream_trace},
+    )
+    await db.commit()
+
+
 @app.post("/api/agents/{agent_id}/chat/stream")
 async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
     """Stream Agent text/tool events as SSE and persist usage after completion."""
@@ -2961,6 +3003,20 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
 
     def sse(event: str, payload: dict[str, Any]) -> str:
         return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+
+    async def persist_stream_failure(exc: Exception, stream_usage: dict[str, int], stream_text: str, stream_trace: list[dict[str, Any]]) -> None:
+        cost_center = await resolve_cost_center(db, ctx.tenant_id, agent.project_id, body.cost_center, "agent")
+        await persist_agent_stream_failure(
+            db,
+            ctx,
+            agent,
+            cost_center=cost_center,
+            started=started,
+            exc=exc,
+            stream_usage=stream_usage,
+            stream_text=stream_text,
+            stream_trace=stream_trace,
+        )
 
     async def event_stream():
         nonlocal conversation
@@ -3018,6 +3074,12 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
         except Exception as exc:
             logger.exception("agent stream failed: %s", exc)
             await db.rollback()
+            if not completed:
+                try:
+                    await persist_stream_failure(exc, stream_usage, stream_text, stream_trace)
+                except Exception:
+                    logger.exception("failed to persist agent stream failure audit")
+                    await db.rollback()
             yield sse("error", {"message": str(exc)[:1000]})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

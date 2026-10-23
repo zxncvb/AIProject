@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app import main
 from app.main import apply_database_column_policy, public_application_runtime, public_runtime_manifest, validate_public_input
 from app.services.llm import rank_providers
 from app.services.sandbox import build_job_manifest
@@ -142,3 +143,42 @@ async def test_reliable_queue_writes_typed_stream_message():
 async def test_reliable_queue_rejects_unknown_job_kind():
     with pytest.raises(ValueError, match="unsupported job kind"):
         await enqueue_job("unknown", "resource-1", SimpleNamespace())
+
+
+@pytest.mark.asyncio
+async def test_agent_stream_failure_persists_partial_usage_and_audit(monkeypatch):
+    class Database:
+        def __init__(self):
+            self.added = []
+            self.committed = False
+
+        def add(self, value):
+            self.added.append(value)
+
+        async def commit(self):
+            self.committed = True
+
+    audits = []
+
+    async def fake_audit(_db, _ctx, action, *_args, **kwargs):
+        audits.append((action, kwargs))
+
+    monkeypatch.setattr(main, "audit", fake_audit)
+    db = Database()
+    ctx = SimpleNamespace(tenant_id="tenant-1", user_id="user-1")
+    agent = SimpleNamespace(id="agent-1")
+    await main.persist_agent_stream_failure(
+        db,
+        ctx,
+        agent,
+        cost_center="agent",
+        started=0,
+        exc=RuntimeError("provider disconnected"),
+        stream_usage={"total_tokens": 11},
+        stream_text="partial",
+        stream_trace=[{"name": "lookup", "status": "success"}],
+    )
+    assert db.committed is True
+    assert next(item for item in db.added if getattr(item, "event_type", "") == "message_failed").tokens == 11
+    assert next(item for item in db.added if item.__class__.__name__ == "ComputeUsage").tokens == 11
+    assert audits[0][0] == "agent.chat.stream.failed"
