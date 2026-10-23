@@ -20,7 +20,7 @@ from ..models import Agent, ApprovalRequest, ComputeUsage, Document, EvaluationJ
 from .knowledge import search_chunks
 from .llm import call_chat, call_routed_chat
 from .evaluation import judge_answer
-from .observability import new_trace_id, run_failures, runs_total, tool_calls
+from .observability import new_trace_id, run_failures, run_span, runs_total, tool_calls
 from .safety import inspect_text
 from .sandbox import build_job_manifest
 from .publication import deliver as deliver_publication
@@ -300,7 +300,8 @@ async def execute_run(run_id: str) -> None:
         await db.commit()
         started_clock = time.perf_counter()
         try:
-            completed, state = await execute_graph(db, run, version)
+            async with run_span(run.trace_id, "workflow.execute", run.tenant_id):
+                completed, state = await execute_graph(db, run, version)
             if run.status == "waiting_approval":
                 return
             if await is_run_cancelled(run.id):

@@ -44,7 +44,7 @@ def new_trace_id() -> str:
 
 
 @asynccontextmanager
-async def run_span(trace_id: str, name: str):
+async def run_span(trace_id: str, name: str, tenant_id: str = "unknown"):
     started = time.perf_counter()
     tracer = trace.get_tracer("enterprise-ai-platform") if trace else None
     span_cm = tracer.start_as_current_span(name) if tracer else None
@@ -54,12 +54,12 @@ async def run_span(trace_id: str, name: str):
             try:
                 yield span
             finally:
-                run_duration.labels("unknown").observe(time.perf_counter() - started)
+                run_duration.labels(tenant_id).observe(time.perf_counter() - started)
     else:
         try:
             yield None
         finally:
-            logger.debug("span=%s duration=%.3fs", name, time.perf_counter() - started)
+            logger.debug("span=%s trace_id=%s tenant_id=%s duration=%.3fs", name, trace_id, tenant_id, time.perf_counter() - started)
 
 
 def metrics_payload() -> bytes:
