@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.main import apply_database_column_policy, public_application_runtime
+from app.main import apply_database_column_policy, public_application_runtime, public_runtime_manifest
 from app.services.llm import rank_providers
 from app.services.sandbox import build_job_manifest
 from app.services.workflow import enqueue_job
@@ -62,6 +62,20 @@ async def test_public_application_details_do_not_expose_source_or_keys():
     assert "runtime" not in result
     assert "source" not in result
     assert "secret-value" not in str(result)
+
+
+def test_public_runtime_manifest_strips_sensitive_ui_metadata():
+    result = public_runtime_manifest({
+        "ui": {"title": "工单", "secret": "do-not-return", "nested": {"api_key": "also-private", "label": "保留"}},
+        "input_schema": {"properties": {"password": {"type": "string"}}},
+        "actions": [{"type": "response", "output": {"token": "private", "value": "ok"}}],
+    })
+    rendered = str(result)
+    assert "do-not-return" not in rendered
+    assert "also-private" not in rendered
+    assert "private" not in rendered
+    assert result["ui"]["nested"]["label"] == "保留"
+    assert "password" in result["input_schema"]["properties"]
 
 
 @pytest.mark.asyncio

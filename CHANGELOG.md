@@ -206,6 +206,7 @@
 - 浏览器会话新增非 HttpOnly CSRF Cookie 与 `X-CSRF-Token` 校验，前端各功能页统一使用带 Cookie/刷新拦截器的共享 API 客户端；已移除旧版 JWT localStorage 入口。
 - 应用中心已增加自定义域名、TLS Secret、应用级公开调用配额和租户隔离访问日志；全代码应用生成的 Ingress 会绑定对应域名与证书 Secret。
 - 新增无需登录的 `/apps/{tenant}/{app}` 公开应用页面，可按输入 schema 渲染表单、提交调用并轮询异步结果。
+- 公开运行时 manifest 增加递归敏感字段脱敏，避免 UI/action 元数据中的 secret、token、header 等配置通过公开接口泄露。
 - 公开 API 已补充最小 Python SDK（`sdk/python`），统一使用 `/api/v1/public` 版本化路径；CI 新增后端服务层覆盖率报告与 20% 门禁，并上传 `coverage.xml` 供发布验收留档。
 
 本机已通过 Python 语法检查、Alembic head 检查、前端生产构建和 `git diff --check`。当前环境没有 Docker 引擎，且本机 Python 3.14 的 Pydantic 依赖版本不匹配，因此 Compose 集成测试、pytest 和真实数据库迁移需要在 CI 的 Python 3.12/Docker 环境中复验。

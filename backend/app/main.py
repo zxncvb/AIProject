@@ -2045,6 +2045,25 @@ def validate_public_input(schema: dict[str, Any], input_data: dict[str, Any]) ->
             raise HTTPException(status_code=422, detail={"code": "invalid_input", "message": "包含未声明字段", "fields": extra})
 
 
+PUBLIC_MANIFEST_SECRET_KEYS = {"secret", "token", "api_key", "apikey", "authorization", "headers", "password", "env", "source"}
+
+
+def sanitize_public_manifest_value(value: Any, parent_key: str = "") -> Any:
+    if isinstance(value, list):
+        return [sanitize_public_manifest_value(item, parent_key) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        key_text = str(key)
+        # Input schema property names may legitimately be called password or
+        # token; only strip sensitive values from their definitions.
+        if parent_key != "properties" and key_text.lower() in PUBLIC_MANIFEST_SECRET_KEYS:
+            continue
+        result[key_text] = sanitize_public_manifest_value(item, key_text.lower())
+    return result
+
+
 def public_runtime_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     ui = manifest.get("ui") if isinstance(manifest.get("ui"), dict) else {"pages": manifest.get("pages", []), "components": manifest.get("components", [])}
     actions = manifest.get("actions") if isinstance(manifest.get("actions"), list) else []
@@ -2053,7 +2072,7 @@ def public_runtime_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(action, dict):
             continue
         safe_actions.append({key: value for key, value in action.items() if key not in {"app_key", "secret", "token", "api_key", "headers"}})
-    return {"ui": ui, "input_schema": manifest.get("input_schema") or {}, "actions": safe_actions, "version": manifest.get("runtime_version", 1)}
+    return {"ui": sanitize_public_manifest_value(ui), "input_schema": manifest.get("input_schema") or {}, "actions": [sanitize_public_manifest_value(item) for item in safe_actions], "version": manifest.get("runtime_version", 1)}
 
 
 async def record_public_application_access(db: AsyncSession, tenant_id: str, application_id: str, version: int, request: Request, status_code: int, started: float) -> None:
