@@ -187,3 +187,37 @@ async def test_stream_agent_loop_reassembles_tool_call_deltas_and_emits_trace(mo
     final = next(item for item in events if item["type"] == "final")
     assert final["text"] == "订单已找到"
     assert final["tool_trace"][0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_loop_does_not_concatenate_repeated_tool_call_ids(monkeypatch):
+    bound = agent_runtime.BoundTool("plugin_p1_lookup", "lookup", "plugin", "p1", "Orders")
+    streams = iter([
+        [
+            {"type": "tool_call_delta", "tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "plugin_p1_", "arguments": "{"}}]},
+            {"type": "tool_call_delta", "tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "lookup", "arguments": "}"}}]},
+            {"type": "done"},
+        ],
+        [{"type": "text", "text": "done"}, {"type": "done"}],
+    ])
+
+    async def fake_load(*_args, **_kwargs):
+        return {bound.name: bound}
+
+    async def fake_stream(*_args, **_kwargs):
+        for item in next(streams):
+            yield item
+
+    executed = []
+
+    async def fake_execute(_db, _tools, calls, **_kwargs):
+        executed.extend(calls)
+        return ([{"role": "tool", "tool_call_id": calls[0]["id"], "name": bound.name, "content": "ok"}], [{"id": calls[0]["id"], "name": bound.name, "kind": "plugin", "status": "success"}])
+
+    monkeypatch.setattr(agent_runtime, "load_agent_tools", fake_load)
+    monkeypatch.setattr(agent_runtime, "stream_routed_chat", fake_stream)
+    monkeypatch.setattr(agent_runtime, "_execute_tool_calls", fake_execute)
+
+    events = [item async for item in agent_runtime.stream_agent_loop(SimpleNamespace(), [{"role": "user", "content": "lookup"}], tenant_id="tenant-1", actor_id="user-1", config=None)]
+    assert executed[0]["id"] == "call-1"
+    assert next(item for item in events if item["type"] == "tool_call")["id"] == "call-1"

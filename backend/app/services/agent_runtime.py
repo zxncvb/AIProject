@@ -390,7 +390,10 @@ async def stream_agent_loop(db: AsyncSession, messages: list[dict[str, Any]], *,
                 for delta in event.get("tool_calls") or []:
                     index = int(delta.get("index", 0))
                     target = deltas.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
-                    target["id"] += str(delta.get("id") or "")
+                    # Providers may repeat the stable call id on subsequent
+                    # deltas; it is an identifier, not an argument fragment.
+                    if not target["id"] and delta.get("id"):
+                        target["id"] = str(delta["id"])
                     fn = delta.get("function") or {}
                     target["function"]["name"] += str(fn.get("name") or "")
                     target["function"]["arguments"] += str(fn.get("arguments") or "")
