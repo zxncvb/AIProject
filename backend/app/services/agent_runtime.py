@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,10 +17,15 @@ from ..models import AgentConfig, AuditEvent, MCPServer, Plugin, Skill
 from ..security import decrypt_secret
 from .llm import call_routed_chat, stream_routed_chat
 from .observability import tool_calls
+from .rate_limit import allow_local
 
 
 MAX_TOOL_RESULT_CHARS = 12000
 MAX_TOOL_ATTEMPTS = 2
+
+
+class ToolRateLimitedError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -185,6 +191,25 @@ def _retryable_tool_status(status_code: int) -> bool:
     return status_code == 429 or 500 <= status_code <= 599
 
 
+def tool_rate_limit_key(tenant_id: str, actor_id: str | None, tool_name: str) -> str:
+    return f"agent-tool:{tenant_id}:{actor_id or 'system'}:{tool_name}"
+
+
+async def allow_tool_call(tenant_id: str, actor_id: str | None, tool_name: str) -> bool:
+    limit = max(1, int(get_settings().agent_tool_rate_limit_per_minute))
+    key = tool_rate_limit_key(tenant_id, actor_id, tool_name)
+    redis = Redis.from_url(get_settings().redis_url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
+    try:
+        count = await redis.incr(f"ai_platform:{key}")
+        if count == 1:
+            await redis.expire(f"ai_platform:{key}", 60)
+        return count <= limit
+    except Exception:
+        return await allow_local(key, limit, 60)
+    finally:
+        await redis.aclose()
+
+
 async def execute_bound_tool(tool: BoundTool, arguments: dict[str, Any], *, tenant_id: str) -> Any:
     if tool.kind == "skill":
         return {"skill": tool.resource_name, "instructions": tool.instructions, "input": arguments}
@@ -270,11 +295,19 @@ async def _execute_tool_calls(db: AsyncSession, tools: dict[str, BoundTool], cal
         try:
             if not bound:
                 raise RuntimeError("工具未在 Agent 能力白名单中")
+            if not await allow_tool_call(tenant_id, actor_id, name):
+                raise ToolRateLimitedError("工具调用频率超过租户/用户限制")
             output = await execute_bound_tool(bound, _json_arguments(call["function"]["arguments"]), tenant_id=tenant_id)
             content = _compact_result(output)
             tool_calls.labels(tenant_id, bound.kind, "success").inc()
             resource_id = bound.resource_id
             kind = bound.kind
+        except ToolRateLimitedError as exc:
+            status = "rate_limited"
+            content = _compact_result({"error": str(exc)[:1000]})
+            tool_calls.labels(tenant_id, bound.kind if bound else "unknown", status).inc()
+            resource_id = bound.resource_id if bound else ""
+            kind = bound.kind if bound else "unknown"
         except Exception as exc:
             status = "error"
             content = _compact_result({"error": str(exc)[:1000]})

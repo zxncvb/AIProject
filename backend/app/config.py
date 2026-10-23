@@ -127,6 +127,7 @@ class Settings(BaseSettings):
     sandbox_java_image: str = ""
     publication_signing_secret: str = ""
     public_app_default_rate_limit: int = 120
+    agent_tool_rate_limit_per_minute: int = 60
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 

@@ -33,6 +33,11 @@ def test_tool_retry_policy_only_retries_transient_statuses():
     assert not agent_runtime._retryable_tool_status(404)
 
 
+def test_tool_rate_limit_key_is_scoped_to_tenant_actor_and_tool():
+    assert agent_runtime.tool_rate_limit_key("tenant-a", "user-1", "lookup") != agent_runtime.tool_rate_limit_key("tenant-b", "user-1", "lookup")
+    assert agent_runtime.tool_rate_limit_key("tenant-a", "user-1", "lookup") != agent_runtime.tool_rate_limit_key("tenant-a", "user-2", "lookup")
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_executes_tool_then_sends_tool_result_back(monkeypatch):
     bound = agent_runtime.BoundTool("plugin_p1_lookup", "lookup", "plugin", "p1", "Orders")
