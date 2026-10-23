@@ -92,3 +92,36 @@ async def test_stream_agent_loop_forwards_usage_for_disconnect_accounting(monkey
     events = [item async for item in agent_runtime.stream_agent_loop(SimpleNamespace(), [{"role": "user", "content": "问题"}], tenant_id="tenant-1", actor_id="user-1", config=None)]
     assert {item["type"] for item in events} == {"usage", "token", "final"}
     assert next(item for item in events if item["type"] == "usage")["usage"]["total_tokens"] == 7
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_loop_reassembles_tool_call_deltas_and_emits_trace(monkeypatch):
+    bound = agent_runtime.BoundTool("plugin_p1_lookup", "lookup", "plugin", "p1", "Orders")
+    streams = iter([
+        [
+            {"type": "tool_call_delta", "tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "look", "arguments": '{"id":'}}]},
+            {"type": "tool_call_delta", "tool_calls": [{"index": 0, "function": {"name": "up", "arguments": ' "42"}'}}]},
+            {"type": "done"},
+        ],
+        [{"type": "text", "text": "订单已找到"}, {"type": "usage", "usage": {"total_tokens": 4}}, {"type": "done"}],
+    ])
+
+    async def fake_load(*_args, **_kwargs):
+        return {bound.name: bound}
+
+    async def fake_stream(*_args, **_kwargs):
+        for item in next(streams):
+            yield item
+
+    async def fake_execute(*_args, **_kwargs):
+        return ([{"role": "tool", "tool_call_id": "call-1", "name": bound.name, "content": "{\"status\":\"ok\"}"}], [{"id": "call-1", "name": bound.name, "kind": "plugin", "status": "success"}])
+
+    monkeypatch.setattr(agent_runtime, "load_agent_tools", fake_load)
+    monkeypatch.setattr(agent_runtime, "stream_routed_chat", fake_stream)
+    monkeypatch.setattr(agent_runtime, "_execute_tool_calls", fake_execute)
+    events = [item async for item in agent_runtime.stream_agent_loop(SimpleNamespace(), [{"role": "user", "content": "查询"}], tenant_id="tenant-1", actor_id="user-1", config=None)]
+    assert next(item for item in events if item["type"] == "tool_call")["name"] == bound.name
+    assert next(item for item in events if item["type"] == "tool_result")["status"] == "success"
+    final = next(item for item in events if item["type"] == "final")
+    assert final["text"] == "订单已找到"
+    assert final["tool_trace"][0]["status"] == "success"
