@@ -20,6 +20,8 @@ grep -q '#HttpOnly_.*eai_refresh_token' "$cookie_jar"
 csrf_token="$(awk '$6 == "eai_csrf_token" {print $7}' "$cookie_jar")"
 test -n "$csrf_token"
 curl --fail --silent --show-error -b "$cookie_jar" "$base_url/api/me" | jq -e '.user.email != null' >/dev/null
+csrf_probe_status="$(curl --silent --output /dev/null --write-out '%{http_code}' -b "$cookie_jar" -X POST "$base_url/api/auth/logout")"
+test "$csrf_probe_status" = "403"
 curl --fail --silent --show-error -b "$cookie_jar" -c "$cookie_jar" -H "X-CSRF-Token: $csrf_token" -H 'Content-Type: application/json' -H 'X-Browser-Session: 1' -d '{}' "$base_url/api/auth/refresh" | jq -e '.user.email != null and .access_token == "" and .refresh_token == null' >/dev/null
 csrf_token="$(awk '$6 == "eai_csrf_token" {print $7}' "$cookie_jar")"
 curl --fail --silent --show-error -b "$cookie_jar" -H "X-CSRF-Token: $csrf_token" -X POST "$base_url/api/auth/logout" | jq -e '.revoked == true' >/dev/null

@@ -413,11 +413,21 @@ async def dispatch_schedules(redis: Redis) -> None:
         queued_ids: list[str] = []
         for schedule in schedules:
             workflow = await db.scalar(select(Workflow).where(Workflow.id == schedule.workflow_id, Workflow.tenant_id == schedule.tenant_id, Workflow.status == "published"))
+            try:
+                next_run_after_due = next_schedule_time(schedule.cron_expression, schedule.timezone, schedule.interval_seconds, schedule.next_run_at)
+                next_run_at = next_schedule_time(schedule.cron_expression, schedule.timezone, schedule.interval_seconds, current)
+            except ValueError:
+                schedule.active = False
+                continue
+            misfired = next_run_after_due <= current
+            if misfired and schedule.misfire_policy == "skip":
+                # The schedule missed one or more occurrences while the worker
+                # was down; advance to the next future occurrence without
+                # creating a catch-up run.
+                schedule.next_run_at = next_run_at
+                continue
             if not workflow or not workflow.published_version:
-                try:
-                    schedule.next_run_at = next_schedule_time(schedule.cron_expression, schedule.timezone, schedule.interval_seconds, current)
-                except ValueError:
-                    schedule.active = False
+                schedule.next_run_at = next_run_at
                 continue
             project = await db.scalar(select(Project).where(Project.id == workflow.project_id, Project.tenant_id == workflow.tenant_id))
             cost_center = f"project:{project.slug}"[:120] if project and project.slug else "workflow"
@@ -426,10 +436,7 @@ async def dispatch_schedules(redis: Redis) -> None:
             await db.flush()
             queued_ids.append(run.id)
             schedule.last_run_at = current
-            try:
-                schedule.next_run_at = next_schedule_time(schedule.cron_expression, schedule.timezone, schedule.interval_seconds, current)
-            except ValueError:
-                schedule.active = False
+            schedule.next_run_at = next_run_at
         await db.commit()
     for run_id in queued_ids:
         await enqueue_job("workflow", run_id, redis)

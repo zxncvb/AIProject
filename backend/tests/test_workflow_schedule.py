@@ -28,3 +28,9 @@ def test_cron_schedule_rejects_invalid_expression():
         next_cron_occurrence("0 9 *", "UTC", datetime.now(timezone.utc))
     with pytest.raises(ValueError):
         next_cron_occurrence("0 9 * * *", "Not/AZone", datetime.now(timezone.utc))
+
+
+def test_misfire_detection_distinguishes_on_time_and_overdue_occurrences():
+    due = datetime(2026, 10, 23, 8, 0, tzinfo=timezone.utc)
+    assert next_schedule_time("", "UTC", 60, due) > datetime(2026, 10, 23, 8, 0, 30, tzinfo=timezone.utc)
+    assert next_schedule_time("", "UTC", 60, due) <= datetime(2026, 10, 23, 8, 2, tzinfo=timezone.utc)
