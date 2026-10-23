@@ -5,6 +5,7 @@
 - 将 Agent SSE 帧解析抽为 `frontend/src/agent_stream.js`，新增 Node 原生测试覆盖分片、CRLF、多行 data 和尾帧。
 - CI 前端 job 现在先执行 `npm test`，再执行生产构建。
 - 集成 CI 增加 Playwright 浏览器 E2E，验证管理员登录、控制台加载和 Agent 中心入口。
+- 浏览器回归增加模拟 SSE 事件链，验证 Agent 工具调用、工具结果、最终文本和完成提示在界面可见。
 
 ## 2026-10-23：公开结果令牌绑定回归
 
