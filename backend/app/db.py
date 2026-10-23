@@ -41,4 +41,10 @@ async def get_controller_db() -> AsyncIterator[AsyncSession]:
 
 async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     """Set transaction-local context consumed by the optional PostgreSQL RLS policies."""
+    # SQLite is supported for local development only and has no PostgreSQL
+    # session GUCs.  Keep the tenant-scoped predicates in application queries
+    # active while skipping the PostgreSQL-only RLS context statement.
+    bind = session.get_bind()
+    if bind.dialect.name == "sqlite":
+        return
     await session.execute(text("select set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": tenant_id})
