@@ -54,3 +54,20 @@ async def test_agent_loop_executes_tool_then_sends_tool_result_back(monkeypatch)
     assert result["tool_rounds"] == 1
     assert result["tool_trace"][0]["status"] == "success"
     assert sent_messages[1][-1]["role"] == "tool"
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_loop_forwards_usage_for_disconnect_accounting(monkeypatch):
+    async def fake_load(*_args, **_kwargs):
+        return {}
+
+    async def fake_stream(*_args, **_kwargs):
+        yield {"type": "usage", "usage": {"total_tokens": 7}}
+        yield {"type": "text", "text": "部分答案"}
+        yield {"type": "done"}
+
+    monkeypatch.setattr(agent_runtime, "load_agent_tools", fake_load)
+    monkeypatch.setattr(agent_runtime, "stream_routed_chat", fake_stream)
+    events = [item async for item in agent_runtime.stream_agent_loop(SimpleNamespace(), [{"role": "user", "content": "问题"}], tenant_id="tenant-1", actor_id="user-1", config=None)]
+    assert {item["type"] for item in events} == {"usage", "token", "final"}
+    assert next(item for item in events if item["type"] == "usage")["usage"]["total_tokens"] == 7

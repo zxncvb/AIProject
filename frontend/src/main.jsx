@@ -112,6 +112,77 @@ function PasswordReset() {
   return <main className="login-page"><section className="login-card"><div className="brand-mark">AI</div><div className="login-kicker">ENTERPRISE AI PLATFORM</div><h1>重置密码</h1><form onSubmit={request}><label>账号邮箱<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label><button className="primary full" type="submit">发送重置链接</button></form><form onSubmit={confirm}><label>重置令牌<input value={token} onChange={(e) => setToken(e.target.value)} minLength="32" required /></label><label>新密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength="12" required /></label><button className="primary full" type="submit">确认新密码</button></form>{message && <div className="notice">{message}</div>}{error && <div className="error">{error}</div>}<button type="button" onClick={() => window.location.assign("/")}>返回登录</button></section></main>;
 }
 
+function PublicApplication({ tenantSlug, appSlug }) {
+  const [runtime, setRuntime] = useState(null);
+  const [form, setForm] = useState({});
+  const [appKey, setAppKey] = useState("");
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const publicApi = axios.create({ baseURL: "/" });
+  const schema = runtime?.runtime?.input_schema || {};
+  const properties = Object.entries(schema.properties || {});
+
+  useEffect(() => {
+    let alive = true;
+    publicApi.get(`/api/v1/public/apps/${encodeURIComponent(tenantSlug)}/${encodeURIComponent(appSlug)}`)
+      .then(({ data }) => { if (alive) setRuntime(data); })
+      .catch((err) => { if (alive) setError(errorText(err, "应用不存在或尚未发布")); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [tenantSlug, appSlug]);
+
+  function setField(name, value, type) {
+    if (type === "number" || type === "integer") {
+      setForm((current) => ({ ...current, [name]: value === "" ? "" : Number(value) }));
+      return;
+    }
+    setForm((current) => ({ ...current, [name]: value }));
+  }
+
+  async function invoke(event) {
+    event.preventDefault(); setError(""); setResult(null); setRunning(true);
+    try {
+      const input = { ...form };
+      for (const [name, definition] of properties) {
+        if (["object", "array"].includes(definition?.type) && typeof input[name] === "string" && input[name].trim()) input[name] = JSON.parse(input[name]);
+      }
+      const headers = appKey ? { "X-App-Key": appKey } : {};
+      const { data } = await publicApi.post(`/api/v1/public/apps/${encodeURIComponent(tenantSlug)}/${encodeURIComponent(appSlug)}/invoke`, { input }, { headers });
+      if (data.status !== "queued" || !data.result_token) { setResult(data); return; }
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        const response = await publicApi.get(`/api/v1/public/runs/${encodeURIComponent(data.result_token)}`);
+        setResult(response.data);
+        if (["succeeded", "failed", "cancelled"].includes(response.data.status)) return;
+      }
+      setError("结果仍在执行，请稍后使用结果令牌继续查询。");
+    } catch (err) { setError(err instanceof SyntaxError ? "对象/数组字段必须填写有效 JSON" : errorText(err, "应用调用失败")); }
+    finally { setRunning(false); }
+  }
+
+  if (loading) return <main className="login-page"><section className="login-card"><div className="brand-mark">AI</div><h1>正在加载应用</h1></section></main>;
+  return <main className="login-page"><section className="login-card" style={{ width: "min(680px, calc(100vw - 32px))" }}>
+    <div className="brand-mark">AI</div><div className="login-kicker">PUBLIC APPLICATION</div>
+    <h1>{runtime?.name || appSlug}</h1><p className="muted">{runtime?.runtime?.ui?.description || "填写表单后运行企业 AI 应用。"}</p>
+    {runtime?.authentication_required && <label>应用调用密钥<input type="password" value={appKey} onChange={(event) => setAppKey(event.target.value)} autoComplete="off" required /></label>}
+    <form className="form-grid" onSubmit={invoke}>
+      {properties.map(([name, definition]) => {
+        const type = definition?.type || "string";
+        const label = definition?.title || definition?.label || name;
+        const required = (schema.required || []).includes(name);
+        if (["object", "array"].includes(type)) return <label key={name}>{label}<textarea value={form[name] || ""} onChange={(event) => setField(name, event.target.value, type)} placeholder={type === "array" ? "[]" : "{}"} required={required} /></label>;
+        return <label key={name}>{label}<input type={type === "number" || type === "integer" ? "number" : type === "boolean" ? "checkbox" : "text"} value={type === "boolean" ? undefined : (form[name] ?? "")} checked={type === "boolean" ? Boolean(form[name]) : undefined} onChange={(event) => setField(name, type === "boolean" ? event.target.checked : event.target.value, type)} required={required} /></label>;
+      })}
+      {!properties.length && <div className="notice">该应用不需要输入参数。</div>}
+      {error && <div className="error">{error}</div>}
+      <button className="primary full" type="submit" disabled={running}>{running ? "运行中…" : "运行应用"}</button>
+    </form>
+    {result && <div className="notice"><b>运行状态：{statusLabels[result.status] || result.status}</b><pre className="json-view" style={{ marginTop: 10 }}>{JSON.stringify(result.output ?? result, null, 2)}</pre></div>}
+  </section></main>;
+}
+
 const workspaceNav = [
   ["overview", "工作台", "⌂"], ["workspaces", "工作空间", "▣"], ["agents", "Agent 中心", "✦"], ["agent-studio", "Agent 编排", "✧"], ["agent-resources", "Agent 资源编排", "⊕"], ["agent-lifecycle", "Agent 生命周期", "↻"], ["applications", "应用中心", "▦"], ["workflows", "工作流", "⌘"], ["workflow-ops", "工作流治理", "✓"],
   ["models", "模型与算力", "◉"], ["model-experience", "模型体验", "▣"], ["model-square", "模型广场", "◇"], ["model-detail", "模型详情", "⌁"], ["knowledge", "知识库", "▤"], ["kb-assets", "知识库扩展", "◫"], ["databases", "数据库", "▥"], ["prompts", "提示词模板", "✎"], ["quick-chat", "快速对话", "☄"], ["extensions", "Skills / 插件", "◇"], ["explore", "探索中心", "☆"], ["runs", "运行与观测", "◌"]
@@ -272,7 +343,7 @@ function Security({ me }) { const [mfa, setMfa] = useState(Boolean(me?.user?.mfa
 
 function Audit({ data }) { return <div className="page"><PageTitle title="审计与治理" description="保留关键资源变更、发布和权限操作证据。" actions={<button onClick={() => window.open("/api/audit/export", "_blank")}>导出审计日志</button>}/><Panel title="审计日志" subtitle={`${data.audit.length} 条记录`}><div className="table"><div className="table-head"><span>时间</span><span>操作</span><span>资源</span><span>操作者</span></div>{data.audit.map((item) => <div className="table-row" key={item.id}><span>{formatDate(item.created_at)}</span><b>{item.action}</b><span>{item.resource_type} / {item.resource_id?.slice(0, 8)}</span><span>{item.user_id?.slice(0, 8) || "系统"}</span></div>)}</div>{!data.audit.length && <Empty text="暂无审计记录。"/>}</Panel></div>; }
 
-function App() {
+function ConsoleApp() {
   const [loggedIn, setLoggedIn] = useState(Boolean(localStorage.getItem("eai_session"))); const [me, setMe] = useState(null); const [page, setPage] = useState("overview"); const [data, setData] = useState({ projects: [], agents: [], workflows: [], applications: [], models: [], kbs: [], skills: [], plugins: [], mcp: [], runs: [], audit: [] });
   async function refresh() { try { const responses = await Promise.all(["/api/me", "/api/projects", "/api/agents", "/api/applications", "/api/workflows", "/api/models", "/api/knowledge-bases", "/api/skills", "/api/plugins", "/api/mcp-servers", "/api/runs", "/api/audit"].map((path) => api.get(path))); const [meR, projects, agents, applications, workflows, models, kbs, skills, plugins, mcp, runs, audit] = responses; setMe(meR.data); setData({ projects: projects.data, agents: agents.data, applications: applications.data, workflows: workflows.data, models: models.data, kbs: kbs.data, skills: skills.data, plugins: plugins.data, mcp: mcp.data, runs: runs.data, audit: audit.data }); } catch (err) { if (err.response?.status === 401) { localStorage.removeItem("eai_session"); setLoggedIn(false); } } }
   useEffect(() => { const params = new URLSearchParams(window.location.search); if (window.location.pathname === "/auth/oidc/callback" && params.get("code") && params.get("state")) { api.post("/api/auth/oidc/callback", { code: params.get("code"), state: params.get("state") }, { headers: { "X-Browser-Session": "1" } }).then(() => { localStorage.setItem("eai_session", "1"); window.history.replaceState({}, "", "/"); setLoggedIn(true); }).catch(() => { window.history.replaceState({}, "", "/"); }); } }, []);
@@ -280,6 +351,12 @@ function App() {
   if (!loggedIn) return window.location.pathname === "/reset-password" ? <PasswordReset /> : <Login onLogin={() => setLoggedIn(true)}/>;
   const content = page === "overview" ? <Overview data={data} go={setPage}/> : page === "workspaces" ? <WorkspaceCenter me={me}/> : page === "agents" ? <Agents data={data} refresh={refresh}/> : page === "agent-studio" ? <AgentStudio data={data}/> : page === "agent-resources" ? <AgentResources data={data}/> : page === "agent-lifecycle" ? <AgentLifecycle data={data}/> : page === "applications" ? <ApplicationsCenter api={api} data={data} refresh={refresh}/> : page === "workflows" ? <Workflows data={data} refresh={refresh}/> : page === "workflow-ops" ? <WorkflowGovernance data={data}/> : page === "models" ? <Models data={data} refresh={refresh}/> : page === "model-experience" ? <ModelExperience api={api} data={data}/> : page === "model-square" ? <ModelSquare data={data}/> : page === "model-detail" ? <ModelDetail data={data}/> : page === "knowledge" ? <Knowledge data={data} refresh={refresh}/> : page === "kb-assets" ? <KnowledgeAssets data={data}/> : page === "databases" ? <><DatabaseCenter data={data}/><div className="page"><DatabasePolicyEditor api={api} role={me?.role}/></div></> : page === "prompts" ? <PromptCenter/> : page === "quick-chat" ? <QuickChat data={data}/> : page === "extensions" ? <ExtensionsControl data={data} refresh={refresh}/> : page === "explore" ? <MarketCenter/> : page === "runs" ? <RunsCenter api={api}/> : page === "members" ? <Members me={me}/> : page === "publishing" ? <PublishingCenter data={data}/> : page === "approvals" ? <ApprovalCenter/> : page === "production-governance" ? <ProductionGovernance api={api} role={me?.role}/> : page === "security" ? <SecurityCenter me={me}/> : page === "admin" ? <PlatformConsole/> : page === "platform-resources" ? <AdminResources/> : page === "account" ? <AccountCenter me={me}/> : <Audit data={data}/>;
   return <Layout me={me} page={page} setPage={setPage} onLogout={() => { api.post("/api/auth/logout", {}).catch(() => {}).finally(() => { localStorage.removeItem("eai_session"); setLoggedIn(false); }); }}>{content}</Layout>;
+}
+
+function App() {
+  const match = window.location.pathname.match(/^\/apps\/([^/]+)\/([^/]+)$/);
+  if (match) return <PublicApplication tenantSlug={decodeURIComponent(match[1])} appSlug={decodeURIComponent(match[2])}/>;
+  return <ConsoleApp/>;
 }
 
 createRoot(document.getElementById("root")).render(<App/>);

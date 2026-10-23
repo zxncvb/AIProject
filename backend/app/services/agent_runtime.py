@@ -313,6 +313,7 @@ async def stream_agent_loop(db: AsyncSession, messages: list[dict[str, Any]], *,
                 yield {"type": "token", "text": event["text"]}
             elif event["type"] == "usage":
                 _merge_usage(usage, event.get("usage"))
+                yield {"type": "usage", "usage": event.get("usage") or {}}
             elif event["type"] == "tool_call_delta":
                 for delta in event.get("tool_calls") or []:
                     index = int(delta.get("index", 0))

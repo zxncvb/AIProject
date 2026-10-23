@@ -2880,14 +2880,32 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
 
     async def event_stream():
         nonlocal conversation
+        stream_usage: dict[str, int] = {}
+        stream_text = ""
+        stream_trace: list[dict[str, Any]] = []
+        completed = False
+
+        def merge_stream_usage(value: dict[str, Any] | None) -> None:
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                if value and value.get(key) is not None:
+                    stream_usage[key] = stream_usage.get(key, 0) + int(value[key] or 0)
+            if "total_tokens" not in stream_usage:
+                stream_usage["total_tokens"] = stream_usage.get("prompt_tokens", 0) + stream_usage.get("completion_tokens", 0)
+
         try:
             async for item in stream_agent_loop(db, messages, tenant_id=ctx.tenant_id, actor_id=ctx.user_id, config=config, preferred_provider_id=agent.provider_id):
                 kind = item.get("type")
                 if kind == "token":
+                    stream_text += item["text"]
                     yield sse("token", {"text": item["text"]})
+                elif kind == "usage":
+                    merge_stream_usage(item.get("usage"))
                 elif kind in {"tool_call", "tool_result"}:
+                    if kind == "tool_result":
+                        stream_trace.append({key: value for key, value in item.items() if key != "type"})
                     yield sse(kind, {key: value for key, value in item.items() if key != "type"})
                 elif kind == "final":
+                    completed = True
                     usage = item.get("usage") or {}
                     total_tokens = int(usage.get("total_tokens", 0))
                     cost_center = await resolve_cost_center(db, ctx.tenant_id, agent.project_id, body.cost_center, "agent")
@@ -2903,6 +2921,15 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
                     await db.flush()
                     yield sse("done", {"agent_id": agent.id, "event_id": event.id, "conversation_id": conversation.id, "text": item.get("text", ""), "usage": usage, "tool_trace": item.get("tool_trace", [])})
         except asyncio.CancelledError:
+            # A client disconnect must still leave an auditable usage record.
+            if not completed:
+                cost_center = await resolve_cost_center(db, ctx.tenant_id, agent.project_id, body.cost_center, "agent")
+                cancelled_tokens = int(stream_usage.get("total_tokens", 0))
+                db.add(ComputeUsage(tenant_id=ctx.tenant_id, cost_center=cost_center, tokens=cancelled_tokens))
+                cancelled_event = AgentEvent(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, event_type="message_cancelled", tokens=cancelled_tokens, latency_ms=int((time.perf_counter() - started) * 1000), detail_json={"stream": True, "cancelled": True, "partial_text_chars": len(stream_text), "tool_trace": stream_trace})
+                db.add(cancelled_event)
+                await audit(db, ctx, "agent.chat.stream.cancelled", "agent", agent.id, {"tokens": cancelled_tokens, "partial_text_chars": len(stream_text), "tool_trace": stream_trace})
+                await db.commit()
             raise
         except Exception as exc:
             logger.exception("agent stream failed: %s", exc)

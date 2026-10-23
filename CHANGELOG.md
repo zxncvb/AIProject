@@ -194,6 +194,7 @@
 本轮已完成并纳入代码与迁移链的整改：
 
 - Agent 已支持租户隔离的 Plugin/MCP/Skill 工具调用、最多三轮 Agent Loop、同步与 SSE 流式输出、工具审计和使用量记录；新增 Agent 会话持久化、查询与删除接口。
+- SSE 客户端断开时会记录取消事件、已产生 Token 和部分输出长度，避免取消请求丢失计费与审计证据；新增流式用量传播回归测试。
 - Agent 长期记忆已增加租户/用户隔离的写入、读取、删除和保留期控制，并在启用时注入同步与流式对话上下文。
 - 账号生命周期已补充 refresh/logout、密码重置令牌、SMTP 邮件发送、开发环境调试令牌、会话撤销和前端重置密码页面。
 - 生产启动守卫、生产文档关闭、移除启动期 `create_all`、Cron/DST、Worker 公平调度、RAG rerank、S3 对象存储、WAL/PITR、审计哈希链、数据库连接器 Host 白名单、SCIM Groups、评测 judge/regression gate 和供应商账单导入已落地。
@@ -203,6 +204,7 @@
 - Compose 已提供可选 `kubernetes` profile，用于启动全代码应用控制器和沙箱控制器；默认开发拓扑不会在没有 Kubernetes 凭据时误启动托管控制器。
 - 浏览器认证已迁移到 HttpOnly Cookie（生产环境 Secure、SameSite=Lax），浏览器模式不再在响应 JSON 中返回 JWT；Bearer/API Key 仍保留给外部客户端，CI 冒烟测试覆盖 Cookie 访问、刷新和登出。
 - 应用中心已增加自定义域名、TLS Secret、应用级公开调用配额和租户隔离访问日志；全代码应用生成的 Ingress 会绑定对应域名与证书 Secret。
+- 新增无需登录的 `/apps/{tenant}/{app}` 公开应用页面，可按输入 schema 渲染表单、提交调用并轮询异步结果。
 - 公开 API 已补充最小 Python SDK（`sdk/python`），统一使用 `/api/v1/public` 版本化路径；CI 新增后端服务层覆盖率报告与 20% 门禁，并上传 `coverage.xml` 供发布验收留档。
 
 本机已通过 Python 语法检查、Alembic head 检查、前端生产构建和 `git diff --check`。当前环境没有 Docker 引擎，且本机 Python 3.14 的 Pydantic 依赖版本不匹配，因此 Compose 集成测试、pytest 和真实数据库迁移需要在 CI 的 Python 3.12/Docker 环境中复验。
