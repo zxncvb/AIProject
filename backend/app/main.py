@@ -2082,40 +2082,6 @@ def _validate_public_input_schema(schema: dict[str, Any], input_data: dict[str, 
 
 def validate_public_input(schema: dict[str, Any], input_data: dict[str, Any]) -> None:
     return _validate_public_input_schema(schema, input_data)
-    if not schema:
-        return
-    if not isinstance(input_data, dict):
-        raise HTTPException(status_code=422, detail={"code": "invalid_input", "message": "应用输入必须是 JSON 对象"})
-    required = schema.get("required") or []
-    missing = [key for key in required if key not in input_data]
-    if missing:
-        raise HTTPException(status_code=422, detail={"code": "invalid_input", "message": "缺少必填字段", "fields": missing})
-    properties = schema.get("properties") or {}
-    if isinstance(properties, dict):
-        type_checks = {
-            "string": lambda value: isinstance(value, str),
-            "number": lambda value: isinstance(value, (int, float)) and not isinstance(value, bool),
-            "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
-            "boolean": lambda value: isinstance(value, bool),
-            "object": lambda value: isinstance(value, dict),
-            "array": lambda value: isinstance(value, list),
-        }
-        invalid = []
-        for key, definition in properties.items():
-            if key not in input_data or not isinstance(definition, dict):
-                continue
-            expected = definition.get("type")
-            check = type_checks.get(expected)
-            if check and not check(input_data[key]):
-                invalid.append(key)
-            if isinstance(input_data[key], str) and definition.get("maxLength") is not None and len(input_data[key]) > int(definition["maxLength"]):
-                invalid.append(key)
-        if invalid:
-            raise HTTPException(status_code=422, detail={"code": "invalid_input", "message": "字段类型或长度不符合应用协议", "fields": sorted(set(invalid))})
-    if schema.get("additionalProperties") is False and isinstance(properties, dict):
-        extra = sorted(set(input_data) - set(properties))
-        if extra:
-            raise HTTPException(status_code=422, detail={"code": "invalid_input", "message": "包含未声明字段", "fields": extra})
 
 
 PUBLIC_MANIFEST_SECRET_KEYS = {"secret", "token", "api_key", "apikey", "authorization", "headers", "password", "env", "source"}
