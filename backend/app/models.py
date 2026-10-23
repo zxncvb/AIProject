@@ -395,6 +395,9 @@ class MCPServer(Base):
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
     secret_encrypted: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    approval_status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    approved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

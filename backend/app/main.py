@@ -4196,7 +4196,7 @@ async def test_plugin(plugin_id: str, ctx: AdminContext, db: AsyncSession = Depe
 @app.get("/api/mcp-servers")
 async def list_mcp_servers(ctx: Context, db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(MCPServer).where(MCPServer.tenant_id == ctx.tenant_id).order_by(MCPServer.name))).scalars().all()
-    return [{"id": row.id, "name": row.name, "endpoint": row.endpoint, "transport": row.transport, "manifest": row.manifest_json, "enabled": row.enabled, "has_secret": bool(row.secret_encrypted)} for row in rows]
+    return [{"id": row.id, "name": row.name, "endpoint": row.endpoint, "transport": row.transport, "manifest": row.manifest_json, "enabled": row.enabled, "approval_status": row.approval_status, "approved_at": row.approved_at, "has_secret": bool(row.secret_encrypted)} for row in rows]
 
 
 @app.post("/api/mcp-servers")
@@ -4211,7 +4211,7 @@ async def create_mcp_server(body: MCPServerCreate, ctx: AdminContext, db: AsyncS
         raise HTTPException(status_code=409, detail="MCP 服务名称已存在") from exc
     await audit(db, ctx, "mcp_server.create", "mcp_server", row.id, {"transport": row.transport})
     await db.commit()
-    return {"id": row.id, "name": row.name, "endpoint": row.endpoint, "transport": row.transport, "enabled": row.enabled}
+    return {"id": row.id, "name": row.name, "endpoint": row.endpoint, "transport": row.transport, "enabled": row.enabled, "approval_status": row.approval_status}
 
 
 @app.patch("/api/mcp-servers/{server_id}")
@@ -4225,11 +4225,36 @@ async def update_mcp_server(server_id: str, body: EnabledUpdate, ctx: AdminConte
     return {"id": row.id, "enabled": row.enabled}
 
 
+@app.post("/api/mcp-servers/{server_id}/approve")
+async def approve_mcp_server(server_id: str, ctx: AdminContext, db: AsyncSession = Depends(get_db)):
+    row = await db.scalar(select(MCPServer).where(MCPServer.id == server_id, MCPServer.tenant_id == ctx.tenant_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="MCP 服务不存在")
+    row.approval_status, row.approved_by, row.approved_at = "approved", ctx.user_id, utcnow()
+    await audit(db, ctx, "mcp_server.approve", "mcp_server", row.id)
+    await db.commit()
+    return {"id": row.id, "approval_status": row.approval_status, "approved_at": row.approved_at}
+
+
+@app.post("/api/mcp-servers/{server_id}/reject")
+async def reject_mcp_server(server_id: str, ctx: AdminContext, db: AsyncSession = Depends(get_db)):
+    row = await db.scalar(select(MCPServer).where(MCPServer.id == server_id, MCPServer.tenant_id == ctx.tenant_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="MCP 服务不存在")
+    row.approval_status, row.approved_by, row.approved_at = "rejected", ctx.user_id, utcnow()
+    row.enabled = False
+    await audit(db, ctx, "mcp_server.reject", "mcp_server", row.id)
+    await db.commit()
+    return {"id": row.id, "approval_status": row.approval_status, "enabled": row.enabled}
+
+
 @app.post("/api/mcp-servers/{server_id}/test")
 async def test_mcp_server(server_id: str, ctx: AdminContext, db: AsyncSession = Depends(get_db)):
     row = await db.scalar(select(MCPServer).where(MCPServer.id == server_id, MCPServer.tenant_id == ctx.tenant_id, MCPServer.enabled.is_(True)))
     if not row:
         raise HTTPException(status_code=404, detail="MCP 服务不存在或已停用")
+    if row.approval_status != "approved":
+        raise HTTPException(status_code=403, detail="MCP 服务必须先通过审批")
     from urllib.parse import urlparse
     host = (urlparse(row.endpoint).hostname or "").lower()
     if row.transport != "stdio" and (not host or host not in get_settings().allowed_hosts):

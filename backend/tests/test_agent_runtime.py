@@ -47,6 +47,12 @@ def test_agent_type_contract_rejects_legacy_execution_labels():
         agent_runtime.validate_agent_type("a2a")
 
 
+def test_mcp_resource_model_exposes_approval_contract():
+    assert hasattr(agent_runtime.MCPServer, "approval_status")
+    assert hasattr(agent_runtime.MCPServer, "approved_by")
+    assert hasattr(agent_runtime.MCPServer, "approved_at")
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_executes_tool_then_sends_tool_result_back(monkeypatch):
     bound = agent_runtime.BoundTool("plugin_p1_lookup", "lookup", "plugin", "p1", "Orders")

@@ -166,7 +166,12 @@ async def load_agent_tools(db: AsyncSession, tenant_id: str, config: AgentConfig
 
     mcp_servers = []
     if mcp_ids:
-        mcp_servers = (await db.execute(select(MCPServer).where(MCPServer.tenant_id == tenant_id, MCPServer.id.in_(mcp_ids), MCPServer.enabled.is_(True)))).scalars().all()
+        mcp_servers = (await db.execute(select(MCPServer).where(
+            MCPServer.tenant_id == tenant_id,
+            MCPServer.id.in_(mcp_ids),
+            MCPServer.enabled.is_(True),
+            MCPServer.approval_status == "approved",
+        ))).scalars().all()
     for server in mcp_servers:
         manifest = server.manifest_json or {}
         for index, item in enumerate(_manifest_tools(manifest, server.name)):
