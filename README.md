@@ -31,13 +31,55 @@ docker compose up -d --build
 访问地址：
 
 - 前端：http://localhost:13000
-- API 文档：http://localhost:18080/docs
+- API 文档：仅在 `APP_ENV=test` 等非生产环境开放，地址为 http://localhost:18080/docs
 - Grafana：http://localhost:13001
 - Prometheus：http://localhost:19090
 
 应用中心和算力治理 API：`/api/applications`、`/api/compute/quota`、`/api/compute/usage`。
 工作流定时触发 API：`/api/workflows/{workflow_id}/schedules`。
 应用运行入口：`/public/apps/{tenant_slug}/{app_slug}`；模型检测：`/api/models/{provider_id}/test`；MCP 服务：`/api/mcp-servers`。
+
+### 本地测试启动（PowerShell）
+
+本地演示不要使用生产默认值；下面的 `.env` 仅用于开发机：
+
+```powershell
+@"
+APP_ENV=test
+APP_SECRET_KEY=local-dev-secret-change-before-production
+APP_ENCRYPTION_KEY=local-dev-encryption-key
+BOOTSTRAP_ADMIN_EMAIL=admin
+BOOTSTRAP_ADMIN_PASSWORD=local-admin-password-123!
+POSTGRES_PASSWORD=local-postgres-password-123!
+POSTGRES_RUNTIME_PASSWORD=local-runtime-password-123!
+GRAFANA_ADMIN_PASSWORD=local-grafana-password-123!
+TRUSTED_HOSTS=localhost,127.0.0.1
+ALLOWED_HTTP_HOSTS=localhost,127.0.0.1
+"@ | Set-Content -LiteralPath .env -Encoding UTF8
+
+docker compose up -d --build
+docker compose ps
+```
+
+然后打开 http://localhost:13000，使用 `admin` / `local-admin-password-123!` 登录。停止服务但保留数据：
+
+```powershell
+docker compose down
+```
+
+前端回归测试（需要先启动 Compose）：
+
+```powershell
+npm test --prefix frontend
+npm run build --prefix frontend
+$env:E2E_BASE_URL="http://localhost:13000"
+$env:E2E_ADMIN_EMAIL="admin"
+$env:E2E_ADMIN_PASSWORD="local-admin-password-123!"
+npx --prefix frontend playwright install chromium
+npm run test:e2e --prefix frontend
+```
+
+生产环境必须使用真实随机密钥、PostgreSQL 非超级用户和固定 digest 的运行时镜像；不要把上面的本地密码用于生产。
 
 ## 本次企业能力包
 
