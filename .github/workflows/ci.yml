@@ -46,7 +46,7 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package.json
-      - run: npm install --prefix frontend --no-audit --no-fund
+      - run: npm ci --prefix frontend --no-audit --no-fund
       - run: npm test --prefix frontend
       - run: npm run build --prefix frontend
 
@@ -90,7 +90,7 @@ jobs:
         shell: bash
         working-directory: frontend
         run: |
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npx playwright install --with-deps chromium
           npm run test:e2e
         env:
