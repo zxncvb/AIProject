@@ -384,3 +384,7 @@
 - Worker 启动改为执行 `validate_controller_startup()`；生产环境会同时校验运行角色非 superuser，以及控制器角色为非 superuser 且显式具备 `BYPASSRLS`。
 - Compose、普通 Kubernetes Worker 和 GPU Worker 均显式注入 `CONTROLLER_DATABASE_URL` 并清空 `DATABASE_ADMIN_URL`；新增静态安全回归测试覆盖该约束。
 
+## 2026-10-23：公开 API 数据库权限收紧
+
+- 公开应用运行时、调用入口和异步结果查询改用 `get_controller_db`，不再通过迁移 owner/admin 连接访问跨租户运行数据。
+- Compose 后端显式注入 `CONTROLLER_DATABASE_URL`；新增 API 契约测试验证三类公开入口均使用控制器数据库依赖。

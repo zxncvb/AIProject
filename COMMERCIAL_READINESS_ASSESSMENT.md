@@ -553,3 +553,10 @@ README 中有三处表述高于当前实现，建议在售前材料和验收文�
 - Worker 启动执行 `validate_controller_startup()`，生产环境同时校验运行角色非 superuser，以及控制器角色为非 superuser 且显式具备 `BYPASSRLS`。
 - Compose、普通 Kubernetes Worker 和 GPU Worker 均显式注入 `CONTROLLER_DATABASE_URL` 并清空 `DATABASE_ADMIN_URL`。
 - 验证结果：后端 `85 passed`，服务层覆盖率 `41.76%`（40% 门禁通过），Python 编译通过，`docker compose config --quiet` 通过，`kubectl kustomize deploy/k8s` 通过；真实 Docker/PostgreSQL/Kubernetes 运行验收仍需目标环境。
+---
+
+## 2026-10-23 追加复核：公开 API 数据库权限收紧
+
+- 公开应用运行时、调用入口和异步结果查询已改用 `get_controller_db`，不再通过迁移 owner/admin 连接访问跨租户运行数据。
+- Compose 后端显式注入 `CONTROLLER_DATABASE_URL`；API 契约测试覆盖运行时、调用和结果查询三类入口。
+- 本批验证：后端 `86 passed`，服务层覆盖率 `41.76%`，Python 编译、Compose 配置和 Kubernetes Kustomize 渲染均通过。

@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app import main
-from app.db import get_admin_db
+from app.db import get_controller_db
 from app.services import public_callback
 
 
@@ -71,7 +71,7 @@ async def test_public_runtime_and_invoke_are_exposed_through_http(monkeypatch):
         yield database
 
     monkeypatch.setattr(main, "Redis", FakeRedis)
-    main.app.dependency_overrides[get_admin_db] = override_db
+    main.app.dependency_overrides[get_controller_db] = override_db
     try:
         transport = httpx.ASGITransport(app=main.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -87,7 +87,7 @@ async def test_public_runtime_and_invoke_are_exposed_through_http(monkeypatch):
             assert invoke_response.status_code == 200
             assert invoke_response.json()["output"] == {"answer": "reset password"}
     finally:
-        main.app.dependency_overrides.pop(get_admin_db, None)
+        main.app.dependency_overrides.pop(get_controller_db, None)
 
 
 @pytest.mark.asyncio
@@ -99,7 +99,7 @@ async def test_public_invoke_rejects_invalid_input_over_http(monkeypatch):
         yield database
 
     monkeypatch.setattr(main, "Redis", FakeRedis)
-    main.app.dependency_overrides[get_admin_db] = override_db
+    main.app.dependency_overrides[get_controller_db] = override_db
     try:
         transport = httpx.ASGITransport(app=main.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -107,7 +107,7 @@ async def test_public_invoke_rejects_invalid_input_over_http(monkeypatch):
             assert response.status_code == 422
             assert response.json()["detail"]["code"] == "invalid_input"
     finally:
-        main.app.dependency_overrides.pop(get_admin_db, None)
+        main.app.dependency_overrides.pop(get_controller_db, None)
 
 
 @pytest.mark.asyncio
@@ -131,7 +131,7 @@ async def test_public_result_token_is_bound_to_tenant_application_and_run(monkey
         yield database
 
     monkeypatch.setattr(main, "Redis", FakeRedis)
-    main.app.dependency_overrides[get_admin_db] = override_db
+    main.app.dependency_overrides[get_controller_db] = override_db
     try:
         token = main.create_public_result_token("workflow", "run-1", "tenant-1", "app-1")
         transport = httpx.ASGITransport(app=main.app)
@@ -146,7 +146,7 @@ async def test_public_result_token_is_bound_to_tenant_application_and_run(monkey
             response = await client.get(f"/api/v1/public/runs/{mismatched_token}")
             assert response.status_code == 404
     finally:
-        main.app.dependency_overrides.pop(get_admin_db, None)
+        main.app.dependency_overrides.pop(get_controller_db, None)
 
 
 def test_public_callback_is_allowlisted_and_signed_payload_is_stable(monkeypatch):

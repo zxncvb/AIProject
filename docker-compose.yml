@@ -140,6 +140,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://platform_runtime:${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD in .env or the shell}@postgres:5432/platform
       DATABASE_ADMIN_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}@postgres:5432/platform
+      CONTROLLER_DATABASE_URL: postgresql+asyncpg://platform_controller:${POSTGRES_CONTROLLER_PASSWORD:?set POSTGRES_CONTROLLER_PASSWORD in .env or the shell}@postgres:5432/platform
       REDIS_URL: redis://redis:6379/0
       QDRANT_URL: http://qdrant:6333
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318/v1/traces

@@ -70,6 +70,16 @@ def test_worker_and_background_delivery_paths_do_not_use_admin_database_role():
     assert 'DATABASE_ADMIN_URL: ""' in worker_block
 
 
+def test_public_runtime_endpoints_use_controller_database_dependency():
+    source = (Path(__file__).parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    assert "get_controller_db" in source
+    for marker in ("public_run_result", "public_application_runtime", "invoke_public_application"):
+        start = source.index(f"async def {marker}")
+        end = source.find("\nasync def ", start + 1)
+        section = source[start:] if end < 0 else source[start:end]
+        assert "Depends(get_controller_db)" in section
+
+
 def test_public_callback_outbox_has_operational_metrics_and_alerts():
     source = (Path(__file__).parents[1] / "app" / "main.py").read_text(encoding="utf-8")
     rules = (Path(__file__).parents[2] / "deploy" / "observability" / "rules" / "public-callback.yml").read_text(encoding="utf-8")

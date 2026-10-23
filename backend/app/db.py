@@ -33,6 +33,12 @@ async def get_admin_db() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+async def get_controller_db() -> AsyncIterator[AsyncSession]:
+    """Provide the least-privileged cross-tenant session for public runtimes."""
+    async with ControllerSessionLocal() as session:
+        yield session
+
+
 async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     """Set transaction-local context consumed by the optional PostgreSQL RLS policies."""
     await session.execute(text("select set_config('app.tenant_id', :tenant_id, true)"), {"tenant_id": tenant_id})

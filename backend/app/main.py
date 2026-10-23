@@ -30,7 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings
-from .db import AdminSessionLocal, SessionLocal, admin_engine, engine, get_admin_db, get_db
+from .db import AdminSessionLocal, SessionLocal, admin_engine, engine, get_admin_db, get_controller_db, get_db
 from .deps import AdminContext, Context, EditorContext, OperatorContext, PermissionAdminContext, RequestContext
 from .models import (
     Agent,
@@ -2297,7 +2297,7 @@ async def enforce_public_result_rate_limit(tenant_id: str, run_id: str, request:
 
 @app.get('/api/v1/public/runs/{result_token}')
 @app.get('/public/runs/{result_token}')
-async def public_run_result(result_token: str, request: Request, db: AsyncSession = Depends(get_admin_db)):
+async def public_run_result(result_token: str, request: Request, db: AsyncSession = Depends(get_controller_db)):
     claims = decode_public_result_token(result_token)
     await enforce_public_result_rate_limit(str(claims['tenant_id']), str(claims['run_id']), request)
     redis = Redis.from_url(get_settings().redis_url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
@@ -2351,7 +2351,7 @@ async def revoke_public_result_token(body: dict[str, Any], ctx: AdminContext, db
 
 @app.get("/api/v1/public/apps/{tenant_slug}/{app_slug}")
 @app.get("/public/apps/{tenant_slug}/{app_slug}")
-async def public_application_runtime(tenant_slug: str, app_slug: str, db: AsyncSession = Depends(get_admin_db)):
+async def public_application_runtime(tenant_slug: str, app_slug: str, db: AsyncSession = Depends(get_controller_db)):
     tenant = await db.scalar(select(Tenant).where(Tenant.slug == tenant_slug, Tenant.is_active.is_(True)))
     row = await db.scalar(select(Application).where(Application.tenant_id == tenant.id if tenant else "", Application.slug == app_slug, Application.status == "deployed")) if tenant else None
     version = await db.scalar(select(ApplicationVersion).where(ApplicationVersion.application_id == row.id, ApplicationVersion.status == "deployed").order_by(ApplicationVersion.version.desc())) if row else None
@@ -2371,7 +2371,7 @@ async def invoke_public_application(
     body: PublicAppInvokeRequest,
     request: Request,
     x_app_key: str | None = Header(default=None),
-    db: AsyncSession = Depends(get_admin_db),
+    db: AsyncSession = Depends(get_controller_db),
 ):
     tenant = await db.scalar(select(Tenant).where(Tenant.slug == tenant_slug, Tenant.is_active.is_(True)))
     row = await db.scalar(select(Application).where(Application.tenant_id == tenant.id if tenant else "", Application.slug == app_slug, Application.status == "deployed")) if tenant else None
