@@ -450,3 +450,9 @@
 - 新增 `email_verified` 字段、Alembic 迁移、一次性 Redis/本地降级令牌，以及 `/api/auth/email-verification/request` 和 `/confirm` 接口。
 - 密码登录现在拒绝未验证邮箱并写入审计；密码重置、OIDC、LDAP、SCIM 和管理员直接创建账号会正确更新验证状态；前端新增邮箱验证页。
 - 本批后端全量测试 `106 passed`，服务层覆盖率 `42.90%`。
+
+
+## 2026-10-24: Email verification HTTP integration regression
+
+- Added ASGI/HTTP coverage for requesting verification, one-time test tokens, confirmation persistence, and non-disclosure for unknown accounts.
+- Latest backend regression: `108 passed`; service-layer coverage remains `42.90%`.
