@@ -41,6 +41,29 @@ sample_file="$(mktemp)"
 trap 'rm -f -- "$sample_file" "$cookie_jar"' EXIT
 printf '企业知识库 CI 测试文档\n' > "$sample_file"
 curl --fail --silent --show-error "${auth[@]}" -F "file=@$sample_file;filename=ci-document.txt" "$base_url/api/knowledge-bases/$kb_id/documents" | jq -e '.security_status == "clean"' >/dev/null
+
+# Exercise the public asynchronous application loop without requiring a model
+# provider: input node -> output node, then publish/invoke/poll the result.
+workflow_slug="ci-async-$(date +%s)"
+workflow_json="$(curl --fail --silent --show-error "${auth[@]}" -H 'Content-Type: application/json' -d "$(jq -n --arg project_id "$project_id" --arg slug "$workflow_slug" '{project_id:$project_id,name:"CI Async Workflow",slug:$slug,graph:{nodes:[{id:"input",type:"default",data:{kind:"input"}},{id:"output",type:"default",data:{kind:"output",value:"{{input.answer}}"}}],edges:[{id:"input-output",source:"input",target:"output"}]},input_schema:{type:"object",required:["answer"],properties:{answer:{type:"string",maxLength:200}}},changelog:"CI async result smoke test"}')" "$base_url/api/workflows")"
+workflow_id="$(echo "$workflow_json" | jq -er '.id')"
+curl --fail --silent --show-error "${auth[@]}" -X POST "$base_url/api/workflows/$workflow_id/publish" | jq -e '.status == "published"' >/dev/null
+
+app_slug="ci-public-async-$(date +%s)"
+app_json="$(curl --fail --silent --show-error "${auth[@]}" -H 'Content-Type: application/json' -d "$(jq -n --arg project_id "$project_id" --arg slug "$app_slug" --arg workflow_id "$workflow_id" '{project_id:$project_id,name:"CI Public Async App",slug:$slug,app_type:"low_code",runtime:{public:true,input_schema:{type:"object",required:["answer"],properties:{answer:{type:"string",maxLength:200}}},workflow_id:$workflow_id,actions:[{type:"workflow",workflow_id:$workflow_id,input:"{{input}}"}]},source:{}}')" "$base_url/api/applications")"
+app_id="$(echo "$app_json" | jq -er '.id')"
+curl --fail --silent --show-error "${auth[@]}" -X POST "$base_url/api/applications/$app_id/deploy" | jq -e '.status == "deployed"' >/dev/null
+invoke_json="$(curl --fail --silent --show-error -H 'Content-Type: application/json' -d '{"input":{"answer":"async-result-ok"}}' "$base_url/api/v1/public/apps/acme/$app_slug/invoke")"
+result_token="$(echo "$invoke_json" | jq -er '.result_token')"
+result_json=''
+for _ in $(seq 1 60); do
+  result_json="$(curl --fail --silent --show-error "$base_url/api/v1/public/runs/$result_token")"
+  result_status="$(echo "$result_json" | jq -r '.status')"
+  if [[ "$result_status" == "succeeded" || "$result_status" == "failed" || "$result_status" == "cancelled" ]]; then break; fi
+  sleep 2
+done
+echo "$result_json" | jq -e '.status == "succeeded" and .output.value == "async-result-ok"' >/dev/null
+
 curl --fail --silent "${auth[@]}" "$base_url/api/admin/jobs/summary" | jq -e '.dead >= 0' >/dev/null
 curl --fail --silent "$base_url/metrics" | grep -q 'ai_platform_job_queue_messages'
 curl --fail --silent http://127.0.0.1:13000/ | grep -q 'lang="zh-CN"'
