@@ -114,6 +114,7 @@ def test_production_requires_immutable_runtime_images():
     settings = Settings(
         app_env="production",
         app_secret_key="a-real-secret",
+        app_encryption_key="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
         bootstrap_admin_password="a-real-password",
         database_url="postgresql+asyncpg://platform:password@db/platform",
         database_admin_url="postgresql+asyncpg://platform:password@db/platform",
@@ -128,6 +129,20 @@ def test_production_requires_immutable_runtime_images():
     settings.sandbox_go_image = digest
     settings.sandbox_java_image = digest
     validate_runtime_settings(settings)
+
+
+def test_production_requires_a_valid_dedicated_encryption_key():
+    settings = Settings(
+        app_env="production",
+        app_secret_key="a-real-secret",
+        app_encryption_key="not-a-fernet-key",
+        bootstrap_admin_password="a-real-password",
+        database_url="postgresql+asyncpg://platform:password@db/platform",
+        database_admin_url="postgresql+asyncpg://platform:password@db/platform",
+        trusted_hosts="platform.example.com",
+    )
+    with pytest.raises(RuntimeError, match="APP_ENCRYPTION_KEY"):
+        validate_runtime_settings(settings)
 
 
 def test_extension_manifest_rejects_capability_outside_allowlist():

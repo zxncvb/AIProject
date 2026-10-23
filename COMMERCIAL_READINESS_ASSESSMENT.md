@@ -631,3 +631,4 @@ README 中有三处表述高于当前实现，建议在售前材料和验收文�
 - API 启动时会执行租户/管理员引导，因此生产环境现在必须显式配置 `DATABASE_ADMIN_URL`；不会再把运行时连接 URL 静默当作引导连接。
 - Worker 和 Kubernetes 控制器仍只使用 `CONTROLLER_DATABASE_URL`，不要求或读取管理员连接；对应测试覆盖 API 启动守卫的缺失配置失败路径。
 - 本批验证结果：后端 `101 passed`，服务层覆盖率 `42.31%`；API 专用管理员连接启动守卫、Python 编译、Compose 配置和 Kustomize 渲染均通过。真实 PostgreSQL 角色权限和 Docker 集成仍需目标环境验收。
+- 生产启动守卫同时拒绝缺失或非法格式的 `APP_ENCRYPTION_KEY`，确保 JWT 签名密钥与数据加密密钥职责分离；针对性安全测试覆盖该失败路径。

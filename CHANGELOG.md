@@ -432,3 +432,6 @@
 
 - API 生产启动现在要求显式配置 `DATABASE_ADMIN_URL`，避免租户/管理员引导静默回退到运行时数据库账号；Worker 和控制器继续只使用 `CONTROLLER_DATABASE_URL`。
 - 新增生产 API 缺少管理员连接时的启动失败回归测试。
+## 2026-10-23：生产加密密钥职责分离守卫
+
+- 生产启动现在要求显式配置有效的 `APP_ENCRYPTION_KEY` Fernet 密钥，不再允许使用 `APP_SECRET_KEY` 派生加密密钥；新增空值和非法格式回归测试。

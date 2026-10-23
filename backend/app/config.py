@@ -2,6 +2,7 @@ from functools import lru_cache
 import re
 from pathlib import Path
 
+from cryptography.fernet import Fernet
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -176,6 +177,13 @@ def validate_runtime_settings(settings: Settings) -> None:
     errors: list[str] = []
     if not settings.app_secret_key or settings.app_secret_key == 'change-me-in-production':
         errors.append('APP_SECRET_KEY must be a unique production secret')
+    if not settings.app_encryption_key:
+        errors.append('APP_ENCRYPTION_KEY must be explicitly configured in production')
+    else:
+        try:
+            Fernet(settings.app_encryption_key.encode())
+        except (TypeError, ValueError):
+            errors.append('APP_ENCRYPTION_KEY must be a valid Fernet key')
     if not settings.bootstrap_admin_password or settings.bootstrap_admin_password == 'ChangeMe_123456':
         errors.append('BOOTSTRAP_ADMIN_PASSWORD must be changed')
     if settings.database_url.lower().startswith('sqlite') or settings.database_admin_url.lower().startswith('sqlite'):
