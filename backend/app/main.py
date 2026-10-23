@@ -524,10 +524,27 @@ async def refresh_operational_metrics() -> None:
         await asyncio.sleep(15)
 
 
+async def validate_database_runtime_role() -> None:
+    """Fail closed when the application connects as a PostgreSQL superuser."""
+    settings = get_settings()
+    if settings.app_env.strip().lower() not in {"production", "prod"}:
+        return
+    try:
+        async with engine.connect() as connection:
+            is_superuser = await connection.scalar(
+                text("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+            )
+    except Exception as exc:
+        raise RuntimeError("Unable to verify that the production runtime database role is non-superuser") from exc
+    if bool(is_superuser):
+        raise RuntimeError("Production runtime database role must not be a PostgreSQL superuser")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     validate_runtime_settings(settings)
+    await validate_database_runtime_role()
     setup_telemetry()
     await bootstrap()
     metrics_task = asyncio.create_task(refresh_operational_metrics())

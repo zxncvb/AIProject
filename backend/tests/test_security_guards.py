@@ -4,6 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.config import Settings, validate_runtime_settings
+from app import main
 from app.main import bind_database_parameters, finops_costs, validate_extension_manifest, validate_knowledge_asset
 
 
@@ -92,3 +93,25 @@ def test_finops_costs_are_calculated_from_usage_and_pricing():
 
     costs = finops_costs(Usage(), {"token_price_per_1k": 0.1, "cpu_price_per_second": 0.2, "gpu_price_per_second": 0.5})
     assert costs == {"tokens": 0.2, "gpu": 2.0, "cpu": 0.6, "total": 2.8}
+
+
+@pytest.mark.asyncio
+async def test_production_runtime_database_role_rejects_superuser(monkeypatch):
+    class Connection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def scalar(self, _statement):
+            return True
+
+    class Engine:
+        def connect(self):
+            return Connection()
+
+    monkeypatch.setattr(main, "engine", Engine())
+    monkeypatch.setattr(main, "get_settings", lambda: Settings(app_env="production"))
+    with pytest.raises(RuntimeError, match="must not be a PostgreSQL superuser"):
+        await main.validate_database_runtime_role()
