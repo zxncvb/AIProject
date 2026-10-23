@@ -21,7 +21,7 @@ jobs:
           --cov=backend/app/services
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
-          --cov-fail-under=20
+          --cov-fail-under=40
       - name: 上传覆盖率报告
         if: always()
         uses: actions/upload-artifact@v4

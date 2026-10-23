@@ -6,6 +6,10 @@
 - 生产控制器启动时校验 controller 角色必须是非 superuser 且具备显式 BYPASSRLS；Compose、Kubernetes Secret 示例和 CI 密钥配置已同步更新。
 - 控制器部署显式清空 `DATABASE_ADMIN_URL`，避免从通用 `.env`/Kubernetes Secret 继承 owner 连接；Compose 配置和 Kustomize 渲染均通过，真实 PostgreSQL 角色创建和控制器运行仍需 Docker/CI 环境验证。
 
+## 2026-10-23：覆盖率门禁增量收紧
+
+- CI 后端服务层覆盖率门禁从 20% 提升到 40%；Python 3.12.12 本地回归为 41.76%，仍继续向审计建议的核心 70%/整体 60% 目标提升。
+
 ## 2026-10-23：多副本启动与租户并发开通保护
 
 - PostgreSQL API 多副本启动时使用事务级 advisory lock 串行执行 bootstrap，避免默认租户、角色和渠道种子数据竞态。
