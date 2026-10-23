@@ -69,6 +69,7 @@
 - 公开结果令牌查询已增加按租户/运行/客户端 IP 的 Redis 限流，并保留本地降级路径，异步结果闭环不再只有调用入口限流。
 - Python SDK 已提供 URL 安全编码和 `invoke_and_wait` 异步终态等待方法，公开应用的调用、轮询和 SDK 使用路径保持一致。
 - Agent 流式测试已覆盖分片工具调用重组及 `tool_call`/`tool_result`/`final` 事件链，补强了工具调用与流式输出的独立验收证据。
+- PostgreSQL PITR 已从参数示例推进为可部署 Compose 覆盖配置、WAL 归档镜像、归档检查脚本和 CloudNativePG 对象存储声明；CI 新增切换 WAL 并检查 `pg_stat_archiver.archived_count` 的 smoke 测试。真实 S3/客户环境恢复演练仍未替代。
 
 ---
 

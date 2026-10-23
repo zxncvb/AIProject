@@ -49,6 +49,15 @@ jobs:
       - run: npm install --prefix frontend --no-audit --no-fund
       - run: npm run build --prefix frontend
 
+  pitr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: PostgreSQL WAL/PITR smoke test
+        shell: bash
+        run: ./deploy/ci/pitr-smoke.sh
+
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 25

@@ -1,4 +1,17 @@
 # 版本与文档修改记录
+
+## 2026-10-23：PITR 归档链路与 CI 验证
+
+### 功能修改
+
+- 新增 `docker-compose.pitr.yml` 和 PostgreSQL 归档镜像，启动时显式开启 `wal_level=replica`、`archive_mode=on` 与 `archive_timeout`。
+- WAL 归档脚本支持 S3/文件目标，校验 WAL 文件名，新增 `pitr-check.sh` 检查运行时归档配置。
+- CloudNativePG 高可用示例声明 Barman 对象存储和 WAL 压缩配置。
+
+### 验证
+
+- 新增灾备配置测试和 `deploy/ci/pitr-smoke.sh`；CI 会切换 WAL 并等待 `pg_stat_archiver.archived_count` 增长。
+- 本地已通过 Compose 配置校验、Python 编译和配置测试；真实 Docker/客户 S3 恢复演练仍需 CI 或目标环境执行。
 ## 2026-10-22：知识库资产改名
 
 ### 功能修改

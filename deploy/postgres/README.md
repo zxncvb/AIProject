@@ -34,3 +34,8 @@ Before declaring disaster recovery accepted, run `deploy/backup/dr-test.sh`
 against a customer-like PostgreSQL/WAL environment and record the observed
 RPO/RTO. Static configuration and Compose validation do not replace that
 exercise.
+
+CI runs `deploy/ci/pitr-smoke.sh`, which starts the PITR Compose override,
+executes `pg_switch_wal()`, and waits for `pg_stat_archiver.archived_count` to
+increase. This proves the local archive command is wired correctly; it does
+not prove S3 credentials, retention, or a customer environment's restore RPO.

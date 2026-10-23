@@ -30,3 +30,13 @@ def test_cloudnativepg_example_declares_object_store_wal_archive():
     assert "destinationPath: s3://REPLACE_WITH_DURABLE_BUCKET/" in text
     assert "wal:" in text
     assert "compression: gzip" in text
+
+
+def test_pitr_smoke_test_switches_wal_and_checks_archiver_progress():
+    text = (ROOT / "deploy" / "ci" / "pitr-smoke.sh").read_text(encoding="utf-8")
+
+    assert "docker-compose.pitr.yml" in text
+    assert "pg_switch_wal" in text
+    assert "pg_stat_archiver" in text
+    assert "archived_count > 0" in text
+    assert "down -v --remove-orphans" in text
