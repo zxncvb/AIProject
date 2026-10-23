@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app import main
 from app.db import get_admin_db
@@ -261,3 +262,52 @@ async def test_public_callback_outbox_requeues_failed_delivery(monkeypatch):
     assert row.attempts == 1
     assert row.response_status == 503
     assert row.last_error == "temporary outage"
+
+
+@pytest.mark.asyncio
+async def test_public_callback_outbox_reuses_row_after_concurrent_unique_conflict(monkeypatch):
+    existing = SimpleNamespace(id="delivery-existing", status="queued")
+    delivered = []
+
+    class Session:
+        def __init__(self):
+            self.values = iter([None, existing])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def scalar(self, _statement):
+            return next(self.values)
+
+        def add(self, _value):
+            return None
+
+        async def flush(self):
+            raise IntegrityError("insert", {}, RuntimeError("duplicate"))
+
+        async def rollback(self):
+            return None
+
+        async def commit(self):
+            return None
+
+    async def fake_deliver(delivery_id):
+        delivered.append(delivery_id)
+        return {"delivered": False}
+
+    monkeypatch.setattr(public_callback, "AdminSessionLocal", lambda: Session())
+    monkeypatch.setattr(public_callback, "validate_public_callback_url", lambda value: value)
+    monkeypatch.setattr(public_callback, "deliver_public_callback_delivery", fake_deliver)
+    result = await public_callback.enqueue_public_callback_delivery(
+        kind="workflow",
+        run_id="run-1",
+        tenant_id="tenant-1",
+        callback_url="https://hooks.example.com/result",
+        payload={"run_id": "run-1"},
+    )
+
+    assert result == "delivery-existing"
+    assert delivered == ["delivery-existing"]

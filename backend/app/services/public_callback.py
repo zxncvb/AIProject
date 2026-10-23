@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 
 from ..config import get_settings
 from ..db import AdminSessionLocal
@@ -176,7 +177,21 @@ async def enqueue_public_callback_delivery(*, kind: str, run_id: str, tenant_id:
         if not row:
             row = PublicCallbackDelivery(tenant_id=tenant_id, kind=kind, run_id=run_id, callback_url=callback_url, payload_json=payload)
             db.add(row)
-            await db.flush()
+            try:
+                await db.flush()
+            except IntegrityError:
+                # Another terminal-state worker may have created the unique
+                # (tenant, kind, run) row between our read and insert.
+                await db.rollback()
+                row = await db.scalar(
+                    select(PublicCallbackDelivery).where(
+                        PublicCallbackDelivery.tenant_id == tenant_id,
+                        PublicCallbackDelivery.kind == kind,
+                        PublicCallbackDelivery.run_id == run_id,
+                    )
+                )
+                if not row:
+                    raise
         elif row.status != "succeeded":
             row.callback_url = callback_url
             row.payload_json = payload
