@@ -29,8 +29,8 @@ from sqlalchemy import delete, desc, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import get_settings, validate_runtime_settings
-from .db import AdminSessionLocal, Base, SessionLocal, admin_engine, engine, get_admin_db, get_db
+from .config import get_settings
+from .db import AdminSessionLocal, SessionLocal, admin_engine, engine, get_admin_db, get_db
 from .deps import AdminContext, Context, EditorContext, OperatorContext, PermissionAdminContext, RequestContext
 from .models import (
     Agent,
@@ -194,6 +194,7 @@ from .services.evaluation import judge_answer
 from .services.public_callback import validate_public_callback_url
 from .services.sandbox import build_job_manifest
 from .services.storage import content_type_for, delete_object, get_bytes, object_key, presign_get, put_bytes
+from .services.startup_guard import validate_database_runtime_role, validate_startup
 from .services.totp import provisioning_uri, random_base32, verify as verify_totp
 from .services.workflow import enqueue_evaluation, enqueue_index, enqueue_job, enqueue_run, enqueue_sandbox, next_schedule_time, ordered_nodes
 
@@ -524,29 +525,10 @@ async def refresh_operational_metrics() -> None:
         await asyncio.sleep(15)
 
 
-async def validate_database_runtime_role() -> None:
-    """Fail closed when the application connects as a PostgreSQL superuser."""
-    settings = get_settings()
-    if settings.app_env.strip().lower() not in {"production", "prod"}:
-        return
-    try:
-        async with engine.connect() as connection:
-            is_superuser = await connection.scalar(
-                text("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
-            )
-    except Exception as exc:
-        raise RuntimeError("Unable to verify that the production runtime database role is non-superuser") from exc
-    if is_superuser is None:
-        raise RuntimeError("Unable to verify that the production runtime database role is non-superuser")
-    if bool(is_superuser):
-        raise RuntimeError("Production runtime database role must not be a PostgreSQL superuser")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    validate_runtime_settings(settings)
-    await validate_database_runtime_role()
+    await validate_startup()
     setup_telemetry()
     await bootstrap()
     metrics_task = asyncio.create_task(refresh_operational_metrics())

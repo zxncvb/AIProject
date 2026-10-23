@@ -12,6 +12,7 @@ from sqlalchemy import select
 from .config import get_settings
 from .db import AdminSessionLocal
 from .models import ApplicationBuild, ApplicationDeployment
+from .services.startup_guard import validate_startup
 
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,7 @@ async def reconcile_once(
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    await validate_startup()
     load_cluster_config()
     batch = client.BatchV1Api()
     apps = client.AppsV1Api()

@@ -16,6 +16,7 @@ from sqlalchemy import select
 from .db import AdminSessionLocal
 from .models import SandboxRun
 from .services.public_callback import deliver_public_callback, public_callback_payload
+from .services.startup_guard import validate_startup
 
 
 NAMESPACE = os.getenv("SANDBOX_NAMESPACE", "ai-platform")
@@ -142,6 +143,7 @@ async def reconcile_once(api: client.BatchV1Api, core_api: client.CoreV1Api | No
 
 
 async def main() -> None:
+    await validate_startup()
     load_cluster_config()
     api = client.BatchV1Api()
     core_api = client.CoreV1Api()

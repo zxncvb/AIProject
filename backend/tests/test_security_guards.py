@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from app.config import Settings, validate_runtime_settings
 from app import main
 from app.main import bind_database_parameters, finops_costs, validate_extension_manifest, validate_knowledge_asset
+from app.services import startup_guard
 
 
 def test_kubernetes_secret_example_documents_production_guard_inputs():
@@ -25,6 +26,13 @@ def test_kubernetes_secret_example_documents_production_guard_inputs():
     ):
         assert f"{field}:" in example
     assert "@sha256:replace-with-64-hex-digest" in example
+
+
+def test_all_production_process_entrypoints_use_shared_startup_guard():
+    root = Path(__file__).parents[1] / "app"
+    for filename in ("main.py", "worker.py", "application_controller.py", "sandbox_controller.py"):
+        source = (root / filename).read_text(encoding="utf-8")
+        assert "validate_startup" in source
 
 
 def test_backup_delivery_contract_is_wired_to_kubernetes_secret():
@@ -111,7 +119,7 @@ async def test_production_runtime_database_role_rejects_superuser(monkeypatch):
         def connect(self):
             return Connection()
 
-    monkeypatch.setattr(main, "engine", Engine())
-    monkeypatch.setattr(main, "get_settings", lambda: Settings(app_env="production"))
+    monkeypatch.setattr(startup_guard, "engine", Engine())
+    monkeypatch.setattr(startup_guard, "get_settings", lambda: Settings(app_env="production"))
     with pytest.raises(RuntimeError, match="must not be a PostgreSQL superuser"):
-        await main.validate_database_runtime_role()
+        await startup_guard.validate_database_runtime_role()
