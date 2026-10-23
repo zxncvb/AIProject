@@ -2162,10 +2162,35 @@ async def enforce_public_app_rate_limit(tenant_id: str, application_id: str, man
         await redis.aclose()
 
 
+async def enforce_public_result_rate_limit(tenant_id: str, run_id: str, request: Request) -> None:
+    """Prevent a result token from being used as an unbounded polling oracle."""
+    settings = get_settings()
+    limit = max(1, min(int(settings.public_app_default_rate_limit), 10000))
+    client_ip = request.client.host if request.client else "unknown"
+    key_suffix = hashlib.sha256(run_id.encode()).hexdigest()[:32]
+    redis = Redis.from_url(settings.redis_url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
+    try:
+        bucket = f"ai_platform:public_result:{tenant_id}:{key_suffix}:{client_ip}"
+        count = await redis.incr(bucket)
+        if count == 1:
+            await redis.expire(bucket, 60)
+        if count > limit:
+            raise HTTPException(status_code=429, detail={"code": "result_rate_limited", "message": "结果查询频率超过限制", "retry_after": 60})
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("public result rate limiter unavailable", exc_info=True)
+        if not await allow_local(f"result:{tenant_id}:{key_suffix}:{client_ip}", limit, 60):
+            raise HTTPException(status_code=429, detail={"code": "result_rate_limited", "message": "结果查询频率超过限制", "retry_after": 60})
+    finally:
+        await redis.aclose()
+
+
 @app.get('/api/v1/public/runs/{result_token}')
 @app.get('/public/runs/{result_token}')
-async def public_run_result(result_token: str, db: AsyncSession = Depends(get_admin_db)):
+async def public_run_result(result_token: str, request: Request, db: AsyncSession = Depends(get_admin_db)):
     claims = decode_public_result_token(result_token)
+    await enforce_public_result_rate_limit(str(claims['tenant_id']), str(claims['run_id']), request)
     redis = Redis.from_url(get_settings().redis_url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
     try:
         if await redis.exists(public_token_revocation_key(result_token)):

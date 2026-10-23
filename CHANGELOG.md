@@ -273,3 +273,7 @@
 ### 生产数据库权限守卫
 
 - 生产 API、Worker 和两个 Kubernetes 控制器启动时都会通过运行连接查询 PostgreSQL 当前角色的 `rolsuper` 属性；无法验证或发现运行账号为超级用户时直接拒绝启动，避免业务进程绕过 RLS 获得全库权限。
+
+### 公开结果查询限流
+
+- `GET /api/v1/public/runs/{result_token}` 增加按租户、结果运行和客户端 IP 的 Redis 限流；Redis 不可用时降级到进程内限流，避免公开令牌被高频轮询拖垮。

@@ -121,3 +121,23 @@ def test_public_callback_is_allowlisted_and_signed_payload_is_stable(monkeypatch
     assert payload["event"] == "public_application.run.completed"
     assert payload["output"] == {"answer": "ok"}
     assert payload["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_public_result_rate_limit_uses_tenant_and_run_scope(monkeypatch):
+    calls = []
+
+    class LimitedRedis(FakeRedis):
+        @classmethod
+        def from_url(cls, *_args, **_kwargs):
+            return cls()
+
+        async def incr(self, key):
+            calls.append(key)
+            return 1
+
+    monkeypatch.setattr(main, "Redis", LimitedRedis)
+    request = SimpleNamespace(client=SimpleNamespace(host="198.51.100.10"))
+    await main.enforce_public_result_rate_limit("tenant-1", "run-1", request)
+    assert calls and "ai_platform:public_result:tenant-1:" in calls[0]
+    assert "198.51.100.10" in calls[0]
