@@ -72,6 +72,7 @@
 - PostgreSQL PITR 已从参数示例推进为可部署 Compose 覆盖配置、WAL 归档镜像、归档检查脚本和 CloudNativePG 对象存储声明；CI 新增切换 WAL 并检查 `pg_stat_archiver.archived_count` 的 smoke 测试。真实 S3/客户环境恢复演练仍未替代。
 - 公开应用回调已增加持久化 outbox、租约、退避重试和 Worker 扫描；回调失败不再只依赖终态控制器进程内的短重试，轮询接口仍是最终事实来源。
 - 审计哈希链新增数据库 append-only 触发器，禁止更新/删除 `audit_events`；该项仍需在真实 PostgreSQL 迁移环境验证权限行为。
+- Agent 控制台已补齐 SSE 客户端闭环：消费 token、工具调用/结果、完成和错误事件，展示工具轨迹并支持取消；前端构建已通过，浏览器端到端和真实模型链路仍需 CI/客户环境验收。
 
 ---
 

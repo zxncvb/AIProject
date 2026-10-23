@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import axios from "axios";
 import { api } from "./api_client";
@@ -32,6 +32,20 @@ function browserCsrfToken() {
 function formatDate(value) {
   if (!value) return "—";
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
+}
+
+function parseAgentSseFrames(buffer, flush = false) {
+  const frames = buffer.split(/\r?\n\r?\n/);
+  if (!flush) buffer = frames.pop() || "";
+  return {
+    buffer: flush ? "" : buffer,
+    events: frames.filter((frame) => frame.trim()).map((frame) => {
+      const eventName = frame.match(/^event:\s*(.+)$/m)?.[1]?.trim() || "message";
+      const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+      if (!data) return { event: eventName, payload: {} };
+      try { return { event: eventName, payload: JSON.parse(data) }; } catch { return { event: eventName, payload: { message: data } }; }
+    }),
+  };
 }
 
 function Login({ onLogin }) {
@@ -201,39 +215,47 @@ function Overview({ data, go }) {
 }
 
 function Agents({ data, refresh }) {
+  const [toolTrace, setToolTrace] = useState([]); const [streaming, setStreaming] = useState(false); const abortRef = useRef(null);
   const [agents, setAgents] = useState(data.agents || []); const [selected, setSelected] = useState(""); const [message, setMessage] = useState(""); const [answer, setAnswer] = useState(""); const [conversationId, setConversationId] = useState("");
   const [workspaces, setWorkspaces] = useState([]); const [importFile, setImportFile] = useState(null);
   const [form, setForm] = useState({ name: "企业智能助手", slug: `assistant-${Date.now()}`, description: "面向企业员工的知识问答助手", system_prompt: "你是一名企业智能助手，请基于企业知识和权限边界回答问题。", provider_id: "", knowledge_base_id: "", workspace_id: "", agent_type: "chat" }); const [question, setQuestion] = useState("");
-  useEffect(() => { setConversationId(""); setAnswer(""); }, [selected]);
+  useEffect(() => { abortRef.current?.abort(); abortRef.current = null; setStreaming(false); setConversationId(""); setAnswer(""); setToolTrace([]); }, [selected]);
+  useEffect(() => () => abortRef.current?.abort(), []);
   async function reload() { try { const res = await api.get("/api/agents"); setAgents(res.data); } catch (err) { setMessage(errorText(err, "Agent 列表读取失败")); } }
   useEffect(() => { reload(); api.get("/api/workspaces").then((res) => { setWorkspaces(res.data); if (!form.workspace_id && res.data[0]) setForm((current) => ({ ...current, workspace_id: res.data[0].id })); }).catch(() => {}); }, []);
   async function create(event) { event.preventDefault(); try { const res = await api.post("/api/agents", { ...form, project_id: data.projects[0]?.id, provider_id: form.provider_id || null, knowledge_base_id: form.knowledge_base_id || null, workspace_id: form.workspace_id || null }); await api.patch(`/api/agents/${res.data.id}/config`, { agent_type: form.agent_type, workspace_id: form.workspace_id || null, prompt_template: form.system_prompt, variables: [], memory: {}, capabilities: {}, experience: {}, safety: {} }); setSelected(res.data.id); setMessage("Agent 已创建并完成工作空间配置"); await reload(); await refresh(); } catch (err) { setMessage(errorText(err, "Agent 创建失败")); } }
   async function importAgent() { if (!importFile) return; try { const payload = JSON.parse(await importFile.text()); await api.post("/api/agents/import", { ...payload, project_id: data.projects[0]?.id }); setImportFile(null); setMessage("Agent 已导入"); await reload(); await refresh(); } catch (err) { setMessage(errorText(err, "Agent 导入失败，请检查 JSON")); } }
   async function removeAgent(agent) { if (window.prompt("请输入智能体名称，以确认删除") !== agent.name) return; try { await api.delete("/api/agents/" + agent.id); if (selected === agent.id) { setSelected(""); setAnswer(""); } setMessage("Agent「" + agent.name + "」已删除"); await reload(); await refresh(); } catch (err) { setMessage(errorText(err, "Agent 删除失败")); } }
   async function chat() {
+    if (streaming) return;
+    setStreaming(true); setToolTrace([]);
+    const controller = new AbortController(); abortRef.current = controller;
     setMessage(""); setAnswer("");
     try {
-      const response = await fetch(`/api/agents/${selected}/chat/stream`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", "X-CSRF-Token": browserCsrfToken() }, body: JSON.stringify({ message: question, conversation_id: conversationId || null }) });
+      const response = await fetch(`/api/agents/${selected}/chat/stream`, { method: "POST", credentials: "include", signal: controller.signal, headers: { "Content-Type": "application/json", "X-CSRF-Token": browserCsrfToken() }, body: JSON.stringify({ message: question, conversation_id: conversationId || null }) });
       if (!response.ok) { let detail = "Agent 调用失败，请先配置模型"; try { const payload = await response.json(); detail = payload.detail?.message || payload.detail || detail; } catch (_) {} throw new Error(detail); }
+      if (!response.body) throw new Error("Agent 流式响应不可用");
       const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ""; let text = "";
+      const handleEvents = (events) => events.forEach(({ event, payload }) => {
+        if (event === "token") { text += payload.text || ""; setAnswer(text); }
+        if (event === "tool_call") { setToolTrace((items) => [...items, { type: event, ...payload }]); setMessage(`正在调用工具：${payload.name || "未命名工具"}`); }
+        if (event === "tool_result") { setToolTrace((items) => [...items, { type: event, ...payload }]); }
+        if (event === "done") { setConversationId(payload.conversation_id || ""); setAnswer(payload.text || text); setMessage("Agent 已完成"); }
+        if (event === "error") throw new Error(payload.message || "Agent 流式调用失败");
+      });
       while (true) {
         const { value, done } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split("\n\n"); buffer = events.pop() || "";
-        for (const raw of events) {
-          const eventName = raw.match(/^event:\s*(.+)$/m)?.[1] || ""; const dataLine = raw.match(/^data:\s*(.+)$/m)?.[1]; if (!dataLine) continue;
-          const payload = JSON.parse(dataLine);
-          if (eventName === "token") { text += payload.text || ""; setAnswer(text); }
-          if (eventName === "done") { setConversationId(payload.conversation_id || ""); setAnswer(payload.text || text); }
-          if (eventName === "error") throw new Error(payload.message || "Agent 流式调用失败");
-        }
+        const parsed = parseAgentSseFrames(buffer); buffer = parsed.buffer; handleEvents(parsed.events);
       }
-      setQuestion("");
-    } catch (err) { setMessage(err.message || "Agent 调用失败，请先配置模型"); }
+      buffer += decoder.decode(); handleEvents(parseAgentSseFrames(buffer, true).events);
+      setQuestion(""); setStreaming(false); abortRef.current = null;
+    } catch (err) { setMessage(err.name === "AbortError" ? "Agent 流式请求已取消" : (err.message || "Agent 调用失败，请先配置模型")); setStreaming(false); abortRef.current = null; }
   }
+  function cancelChat() { abortRef.current?.abort(); }
   return <div className="page"><PageTitle title="Agent 中心" description="创建、配置、测试和发布可复用的企业智能体。" actions={<><label className="file-button">选择导入文件<input type="file" accept=".json" onChange={(e) => setImportFile(e.target.files[0])}/></label><button onClick={importAgent} disabled={!importFile}>导入 Agent</button><button className="primary" onClick={() => document.getElementById("agent-create")?.scrollIntoView({ behavior: "smooth" })}>+ 创建 Agent</button></>}/>
     <div className="sub-tabs"><button className="active">本地 Agent <b>{agents.length}</b></button><button>我的收藏 <b>0</b></button><div className="table-tools"><input placeholder="搜索 Agent"/><button>筛选</button></div></div>
     <div className="agent-layout"><Panel title="Agent 资产" subtitle={`${agents.length} 个智能体，支持模型和知识库绑定`} className="asset-panel"><div className="card-grid">{agents.map((agent) => <article className={`asset-card ${selected === agent.id ? "selected" : ""}`} key={agent.id} role="button" tabIndex={0} onClick={() => setSelected(agent.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setSelected(agent.id); }}><div className="asset-icon">✦</div><div className="asset-card-body"><div className="card-title"><b>{agent.name}</b><button type="button" className="delete-button asset-delete" title="删除 Agent" onClick={(event) => { event.stopPropagation(); removeAgent(agent); }}>删除</button></div><p>{agent.description || "企业智能助手"}</p><small>v{agent.version || 1} · {agent.provider_id ? "已绑定模型" : "未绑定模型"}</small><div><StatusTag value={agent.enabled ? "已就绪" : "已停用"}/></div></div></article>)}</div>{!agents.length && <Empty text="还没有 Agent，请从右侧创建第一个企业智能体。"/>}</Panel>
-      <Panel title="创建 / 测试 Agent" subtitle="先选择类型和工作空间，再绑定模型进行真实对话测试" className="agent-editor"><form id="agent-create" className="form-grid" onSubmit={create}><label>名称<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required/></label><label>唯一标识<input value={form.slug} onChange={(e) => setForm({ ...form, slug: e.target.value })} required/></label><label>智能体类型<select value={form.agent_type} onChange={(e) => setForm({ ...form, agent_type: e.target.value })}><option value="chat">对话型</option><option value="chatflow">对话流型</option></select></label><label>工作空间<select value={form.workspace_id} onChange={(e) => setForm({ ...form, workspace_id: e.target.value })}><option value="">不指定工作空间</option>{workspaces.map((space) => <option value={space.id} key={space.id}>{space.name}</option>)}</select></label><label>模型提供商<select value={form.provider_id} onChange={(e) => setForm({ ...form, provider_id: e.target.value })}><option value="">自动选择已启用模型</option>{data.models.map((model) => <option value={model.id} key={model.id}>{model.name} / {model.default_model}</option>)}</select></label><label>知识库<select value={form.knowledge_base_id} onChange={(e) => setForm({ ...form, knowledge_base_id: e.target.value })}><option value="">不绑定知识库</option>{data.kbs.map((kb) => <option value={kb.id} key={kb.id}>{kb.name}</option>)}</select></label><label>系统提示词<textarea value={form.system_prompt} onChange={(e) => setForm({ ...form, system_prompt: e.target.value })} required/></label><button className="primary" type="submit">创建 Agent</button></form><div className="chat-box"><div className="section-label">对话测试 {selected ? "· 已选择 Agent" : "· 请先选择 Agent"}</div><div className="search-row"><input value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="例如：公司差旅报销标准是什么？"/><button disabled={!selected || !question.trim()} onClick={chat}>发送</button></div>{answer && <article className="answer"><b>Agent 回复</b><p>{answer}</p></article>}</div>{message && <div className="notice">{message}</div>}</Panel></div>
+      <Panel title="创建 / 测试 Agent" subtitle="先选择类型和工作空间，再绑定模型进行真实对话测试" className="agent-editor"><form id="agent-create" className="form-grid" onSubmit={create}><label>名称<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required/></label><label>唯一标识<input value={form.slug} onChange={(e) => setForm({ ...form, slug: e.target.value })} required/></label><label>智能体类型<select value={form.agent_type} onChange={(e) => setForm({ ...form, agent_type: e.target.value })}><option value="chat">对话型</option><option value="chatflow">对话流型</option></select></label><label>工作空间<select value={form.workspace_id} onChange={(e) => setForm({ ...form, workspace_id: e.target.value })}><option value="">不指定工作空间</option>{workspaces.map((space) => <option value={space.id} key={space.id}>{space.name}</option>)}</select></label><label>模型提供商<select value={form.provider_id} onChange={(e) => setForm({ ...form, provider_id: e.target.value })}><option value="">自动选择已启用模型</option>{data.models.map((model) => <option value={model.id} key={model.id}>{model.name} / {model.default_model}</option>)}</select></label><label>知识库<select value={form.knowledge_base_id} onChange={(e) => setForm({ ...form, knowledge_base_id: e.target.value })}><option value="">不绑定知识库</option>{data.kbs.map((kb) => <option value={kb.id} key={kb.id}>{kb.name}</option>)}</select></label><label>系统提示词<textarea value={form.system_prompt} onChange={(e) => setForm({ ...form, system_prompt: e.target.value })} required/></label><button className="primary" type="submit">创建 Agent</button></form><div className="chat-box"><div className="section-label">对话测试 {selected ? "· 已选择 Agent" : "· 请先选择 Agent"}</div><div className="search-row"><input value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="例如：公司差旅报销标准是什么？"/><button disabled={!selected || !question.trim() || streaming} onClick={streaming ? cancelChat : chat}>{streaming ? "取消" : "发送"}</button></div>{toolTrace.length > 0 && <div className="tool-trace"><div className="section-label">工具调用轨迹</div>{toolTrace.map((item, index) => <div className="tool-trace-item" key={`${item.type}-${item.id || item.name || index}`}><span>{item.type === "tool_call" ? "调用" : "结果"}</span><b>{item.name || "未命名工具"}</b><small>{item.status || "进行中"}</small></div>)}</div>}{answer && <article className="answer"><b>Agent 回复</b><p>{answer}</p></article>}</div>{message && <div className="notice">{message}</div>}</Panel></div>
   </div>;
 }
 
