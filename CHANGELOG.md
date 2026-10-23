@@ -253,3 +253,7 @@
 ### PostgreSQL RLS 验收补强
 
 - CI 集成阶段新增跨租户 RLS 冒烟：使用 runtime 数据库角色分别设置两个租户上下文，验证 `tenants` 查询各自只能看到一行，测试结束自动清理临时租户。
+
+### 灾备交付链补强
+
+- 灾备演练支持 `DR_BACKUP_IMAGE` 指定生产备份镜像；Kubernetes 备份 CronJob 接入可选的 `BACKUP_S3_URI` 异地对象存储配置，Secret 示例同步补充 WAL/备份归档 URI。

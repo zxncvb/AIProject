@@ -121,7 +121,7 @@ docker run --rm \
   enterprise-ai-platform/backup:latest
 ```
 
-恢复脚本要求显式设置 `RESTORE_CONFIRM=RESTORE`，并在写入前验证归档内 SHA-256。`deploy/backup/dr-test.sh` 会启动临时 PostgreSQL 和临时附件卷做隔离演练，不覆盖生产数据库。Kubernetes 默认每天 02:00 运行 `enterprise-ai-backup` CronJob；生产必须把备份复制到异地对象存储并定期验证 RPO/RTO。
+恢复脚本要求显式设置 `RESTORE_CONFIRM=RESTORE`，并在写入前验证归档内 SHA-256。`deploy/backup/dr-test.sh` 会启动临时 PostgreSQL 和临时附件卷做隔离演练，不覆盖生产数据库；可通过 `DR_BACKUP_IMAGE` 指定与生产一致的备份镜像。Kubernetes 默认每天 02:00 运行 `enterprise-ai-backup` CronJob；生产应在 `BACKUP_S3_URI` 中配置异地对象存储，并定期验证 RPO/RTO。
 
 优先级能力验收：
 

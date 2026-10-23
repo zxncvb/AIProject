@@ -42,6 +42,12 @@ spec:
                 - {name: BACKUP_DIR, value: /backups}
                 - {name: ARTIFACT_DIR, value: /artifacts/artifacts}
                 - {name: BACKUP_RETENTION_DAYS, value: "30"}
+                - name: BACKUP_S3_URI
+                  valueFrom:
+                    secretKeyRef:
+                      name: enterprise-ai-secrets
+                      key: BACKUP_S3_URI
+                      optional: true
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

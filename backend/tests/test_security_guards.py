@@ -24,6 +24,13 @@ def test_kubernetes_secret_example_documents_production_guard_inputs():
     assert "@sha256:replace-with-64-hex-digest" in example
 
 
+def test_backup_delivery_contract_is_wired_to_kubernetes_secret():
+    cronjob = (Path(__file__).parents[2] / "deploy" / "k8s" / "backup-cronjob.yaml").read_text(encoding="utf-8")
+    assert "BACKUP_S3_URI" in cronjob
+    assert "optional: true" in cronjob
+    assert "DR_BACKUP_IMAGE" in (Path(__file__).parents[2] / "deploy" / "backup" / "dr-test.sh").read_text(encoding="utf-8")
+
+
 def test_production_defaults_fail_fast_and_safe_settings_pass():
     with pytest.raises(RuntimeError, match="APP_SECRET_KEY"):
         validate_runtime_settings(Settings(app_env="production"))
