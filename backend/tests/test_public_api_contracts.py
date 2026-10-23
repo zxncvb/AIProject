@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import time
 
 import httpx
 import pytest
@@ -148,6 +149,54 @@ async def test_public_result_token_is_bound_to_tenant_application_and_run(monkey
             assert response.status_code == 404
     finally:
         main.app.dependency_overrides.pop(get_controller_db, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,error", [("failed", "workflow failed"), ("cancelled", "cancelled by user")])
+async def test_public_result_http_contract_hides_output_for_non_success_terminal_states(monkeypatch, status, error):
+    row = SimpleNamespace(
+        id="run-1",
+        tenant_id="tenant-1",
+        workflow_id="workflow-1",
+        status=status,
+        output_json={"sensitive": "must-not-be-returned"},
+        error=error,
+        created_at=None,
+        started_at=None,
+        finished_at=None,
+    )
+    application = SimpleNamespace(id="app-1", tenant_id="tenant-1", status="deployed")
+    version = SimpleNamespace(version=2, manifest_json={"workflow_id": "workflow-1"})
+    database = FakeDatabase(row, application, version)
+
+    async def override_db():
+        yield database
+
+    monkeypatch.setattr(main, "Redis", FakeRedis)
+    main.app.dependency_overrides[get_controller_db] = override_db
+    try:
+        token = main.create_public_result_token("workflow", "run-1", "tenant-1", "app-1")
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(f"/api/v1/public/runs/{token}")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == status
+        assert response.json()["output"] is None
+        assert response.json()["error"] == error
+    finally:
+        main.app.dependency_overrides.pop(get_controller_db, None)
+
+
+def test_public_result_token_expiry_is_rejected(monkeypatch):
+    token = main.create_public_result_token("workflow", "run-1", "tenant-1", "app-1")
+    current_time = time.time()
+    monkeypatch.setattr(main.time, "time", lambda: current_time + main.PUBLIC_RESULT_TOKEN_TTL_SECONDS + 1)
+
+    with pytest.raises(main.HTTPException) as exc:
+        main.decode_public_result_token(token)
+
+    assert exc.value.status_code == 401
 
 
 @pytest.mark.asyncio
