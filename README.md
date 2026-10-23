@@ -47,7 +47,7 @@ docker compose up -d --build
 @"
 APP_ENV=test
 APP_SECRET_KEY=local-dev-secret-change-before-production
-APP_ENCRYPTION_KEY=local-dev-encryption-key
+APP_ENCRYPTION_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
 BOOTSTRAP_ADMIN_EMAIL=admin
 BOOTSTRAP_ADMIN_PASSWORD=local-admin-password-123!
 POSTGRES_PASSWORD=local-postgres-password-123!
