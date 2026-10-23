@@ -1,5 +1,10 @@
 # 版本与文档修改记录
 
+## 2026-10-23：前端流式解析回归测试
+
+- 将 Agent SSE 帧解析抽为 `frontend/src/agent_stream.js`，新增 Node 原生测试覆盖分片、CRLF、多行 data 和尾帧。
+- CI 前端 job 现在先执行 `npm test`，再执行生产构建。
+
 ## 2026-10-23：Agent 前端流式交互闭环
 
 - 前端 Agent 控制台消费 `token`、`tool_call`、`tool_result`、`done` 和 `error` SSE 事件，展示工具调用轨迹。

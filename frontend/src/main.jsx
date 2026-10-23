@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import axios from "axios";
 import { api } from "./api_client";
+import { parseAgentSseFrames } from "./agent_stream";
 import { Background, Controls, ReactFlow, addEdge, useEdgesState, useNodesState } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
@@ -32,20 +33,6 @@ function browserCsrfToken() {
 function formatDate(value) {
   if (!value) return "—";
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
-}
-
-function parseAgentSseFrames(buffer, flush = false) {
-  const frames = buffer.split(/\r?\n\r?\n/);
-  if (!flush) buffer = frames.pop() || "";
-  return {
-    buffer: flush ? "" : buffer,
-    events: frames.filter((frame) => frame.trim()).map((frame) => {
-      const eventName = frame.match(/^event:\s*(.+)$/m)?.[1]?.trim() || "message";
-      const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
-      if (!data) return { event: eventName, payload: {} };
-      try { return { event: eventName, payload: JSON.parse(data) }; } catch { return { event: eventName, payload: { message: data } }; }
-    }),
-  };
 }
 
 function Login({ onLogin }) {
