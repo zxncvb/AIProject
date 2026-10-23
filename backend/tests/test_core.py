@@ -61,6 +61,8 @@ def test_rag_metadata_filter_is_allowlisted_and_bounded():
         normalize_metadata_filter({"tenant_id": "other-tenant"})
     with pytest.raises(ValueError, match="1-20"):
         normalize_metadata_filter({"source": list(range(21))})
+    with pytest.raises(ValueError, match="scalar"):
+        normalize_metadata_filter({"source": [{"secret": "value"}]})
 
 
 def test_worker_fair_order_round_robins_tenants_and_respects_priority():

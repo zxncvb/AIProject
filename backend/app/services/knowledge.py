@@ -63,6 +63,8 @@ def normalize_metadata_filter(metadata: dict[str, Any] | None) -> dict[str, str 
         if key not in SEARCH_METADATA_FIELDS:
             raise ValueError(f"unsupported metadata filter: {key}")
         if isinstance(value, list):
+            if any(item is None or not isinstance(item, (str, int, float, bool)) for item in value):
+                raise ValueError(f"metadata filter {key} must contain scalar values")
             values = [str(item).strip() for item in value if str(item).strip()]
             if not values or len(values) > 20:
                 raise ValueError(f"metadata filter {key} must contain 1-20 values")
