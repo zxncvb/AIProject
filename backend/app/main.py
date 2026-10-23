@@ -536,6 +536,8 @@ async def validate_database_runtime_role() -> None:
             )
     except Exception as exc:
         raise RuntimeError("Unable to verify that the production runtime database role is non-superuser") from exc
+    if is_superuser is None:
+        raise RuntimeError("Unable to verify that the production runtime database role is non-superuser")
     if bool(is_superuser):
         raise RuntimeError("Production runtime database role must not be a PostgreSQL superuser")
 
