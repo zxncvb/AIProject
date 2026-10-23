@@ -207,6 +207,31 @@ async def enqueue_public_callback_delivery(*, kind: str, run_id: str, tenant_id:
     return delivery_id
 
 
+async def notify_public_sandbox_callback(row: Any) -> None:
+    """Queue a terminal callback for a SandboxRun, including dispatch failures."""
+    callback_url = str((row.source_json or {}).get("callback_url") or "").strip()
+    if not callback_url:
+        return
+    try:
+        await enqueue_public_callback_delivery(
+            kind="sandbox",
+            run_id=row.id,
+            tenant_id=row.tenant_id,
+            callback_url=callback_url,
+            payload=public_callback_payload(
+                kind="sandbox",
+                run_id=row.id,
+                tenant_id=row.tenant_id,
+                status=row.status,
+                output=row.output_json,
+                error=row.error,
+                finished_at=row.finished_at,
+            ),
+        )
+    except Exception:
+        logger.exception("public sandbox callback was not queued run_id=%s", row.id)
+
+
 async def deliver_due_public_callbacks(limit: int = 20) -> int:
     """Drain due callbacks; stale leases are reclaimable after a worker crash."""
     now = utcnow()

@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from .db import ControllerSessionLocal
 from .models import SandboxRun
-from .services.public_callback import enqueue_public_callback_delivery, public_callback_payload
+from .services.public_callback import notify_public_sandbox_callback
 from .services.startup_guard import validate_controller_startup
 
 
@@ -57,30 +57,6 @@ def job_logs(core_api: client.CoreV1Api | None, run_id: str) -> str:
     return "\n".join(parts)[:65536]
 
 
-async def notify_public_callback(row: SandboxRun) -> None:
-    callback_url = str((row.source_json or {}).get("callback_url") or "").strip()
-    if not callback_url:
-        return
-    try:
-        await enqueue_public_callback_delivery(
-            kind="sandbox",
-            run_id=row.id,
-            tenant_id=row.tenant_id,
-            callback_url=callback_url,
-            payload=public_callback_payload(
-                kind="sandbox",
-                run_id=row.id,
-                tenant_id=row.tenant_id,
-                status=row.status,
-                output=row.output_json,
-                error=row.error,
-                finished_at=row.finished_at,
-            ),
-        )
-    except Exception:
-        logger.exception("public sandbox callback was not queued run_id=%s", row.id)
-
-
 async def reconcile_once(api: client.BatchV1Api, core_api: client.CoreV1Api | None = None) -> None:
     async with ControllerSessionLocal() as db:
         submitted = (await db.execute(select(SandboxRun).where(SandboxRun.status == "submitted").limit(20))).scalars().all()
@@ -105,7 +81,7 @@ async def reconcile_once(api: client.BatchV1Api, core_api: client.CoreV1Api | No
                     row.status, row.error = "failed", f"kubernetes submit failed: {exc.reason}"
                     row.finished_at = datetime.now(timezone.utc)
                     await db.commit()
-                    await notify_public_callback(row)
+                    await notify_public_sandbox_callback(row)
         active = (await db.execute(select(SandboxRun).where(SandboxRun.status == "running").limit(50))).scalars().all()
         for row in active:
             name = job_name(row)
@@ -117,7 +93,7 @@ async def reconcile_once(api: client.BatchV1Api, core_api: client.CoreV1Api | No
                 if exc.status == 404:
                     row.status, row.error, row.finished_at = "failed", "Kubernetes Job 不存在", datetime.now(timezone.utc)
                     await db.commit()
-                    await notify_public_callback(row)
+                    await notify_public_sandbox_callback(row)
                     continue
                 raise
             status = job.status
@@ -132,7 +108,7 @@ async def reconcile_once(api: client.BatchV1Api, core_api: client.CoreV1Api | No
                 row.finished_at = datetime.now(timezone.utc)
                 row.output_json = {"job_name": name, "succeeded": bool(status.succeeded), "logs": logs}
                 await db.commit()
-                await notify_public_callback(row)
+                await notify_public_sandbox_callback(row)
                 delete_job(api, name)
         cancelled = (await db.execute(select(SandboxRun).where(SandboxRun.status == "cancelled").limit(50))).scalars().all()
         for row in cancelled:
@@ -140,7 +116,7 @@ async def reconcile_once(api: client.BatchV1Api, core_api: client.CoreV1Api | No
                 delete_job(api, job_name(row))
                 row.output_json = {**(row.output_json or {}), "job_cleaned": True}
                 await db.commit()
-                await notify_public_callback(row)
+                await notify_public_sandbox_callback(row)
 
 
 async def main() -> None:

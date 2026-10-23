@@ -24,7 +24,7 @@ from .observability import new_trace_id, run_failures, run_span, runs_total, too
 from .safety import inspect_text
 from .sandbox import build_job_manifest
 from .publication import deliver as deliver_publication
-from .public_callback import deliver_due_public_callbacks, enqueue_public_callback_delivery, public_callback_payload
+from .public_callback import deliver_due_public_callbacks, enqueue_public_callback_delivery, notify_public_sandbox_callback, public_callback_payload
 
 
 QUEUE = "ai_platform:workflow_runs"
@@ -410,6 +410,7 @@ async def execute_sandbox(run_id: str) -> None:
         except Exception as exc:
             row.status, row.error, row.finished_at = "failed", str(exc), now()
             await db.commit()
+            await notify_public_sandbox_callback(row)
 
 
 async def reconcile_gpu_leases() -> None:

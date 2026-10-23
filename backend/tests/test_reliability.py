@@ -208,3 +208,49 @@ async def test_public_workflow_callback_is_sent_after_terminal_state(monkeypatch
     assert sent[0][0] == "https://hooks.example.com/result"
     assert sent[0][1]["run_id"] == "run-1"
     assert sent[0][1]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_public_sandbox_callback_is_sent_when_dispatch_manifest_fails(monkeypatch):
+    sent = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def scalar(self, _statement):
+            return row
+
+        async def commit(self):
+            return None
+
+    row = SimpleNamespace(
+        id="sandbox-1",
+        tenant_id="tenant-1",
+        status="queued",
+        runtime="python",
+        source_json={"callback_url": "https://hooks.example.com/result", "source": {"command": ["python", "-c", "pass"]}},
+        output_json=None,
+        error="",
+        finished_at=None,
+        manifest_json={},
+    )
+
+    async def fake_callback(value):
+        sent.append((value.status, value.error))
+
+    def broken_manifest(*_args, **_kwargs):
+        raise ValueError("invalid runtime manifest")
+
+    monkeypatch.setattr(workflow, "ControllerSessionLocal", lambda: Session())
+    monkeypatch.setattr(workflow, "build_job_manifest", broken_manifest)
+    monkeypatch.setattr(workflow, "notify_public_sandbox_callback", fake_callback)
+
+    await workflow.execute_sandbox("sandbox-1")
+
+    assert row.status == "failed"
+    assert row.error == "invalid runtime manifest"
+    assert sent == [("failed", "invalid runtime manifest")]
