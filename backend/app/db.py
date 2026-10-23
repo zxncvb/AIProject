@@ -16,6 +16,11 @@ engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 admin_engine = create_async_engine(settings.database_admin_url or settings.database_url, pool_pre_ping=True)
 AdminSessionLocal = async_sessionmaker(admin_engine, expire_on_commit=False, class_=AsyncSession)
+controller_engine = create_async_engine(
+    settings.controller_database_url or settings.database_admin_url or settings.database_url,
+    pool_pre_ping=True,
+)
+ControllerSessionLocal = async_sessionmaker(controller_engine, expire_on_commit=False, class_=AsyncSession)
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:

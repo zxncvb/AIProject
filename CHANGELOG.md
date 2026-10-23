@@ -1,5 +1,11 @@
 # 版本与文档修改记录
 
+## 2026-10-23：控制器数据库身份隔离
+
+- 新增 `platform_controller` 非 superuser、显式 `BYPASSRLS` 数据库角色；应用和沙箱控制器改用 `CONTROLLER_DATABASE_URL`，不再复用迁移/引导 owner 连接。
+- 生产控制器启动时校验 controller 角色必须是非 superuser 且具备显式 BYPASSRLS；Compose、Kubernetes Secret 示例和 CI 密钥配置已同步更新。
+- 控制器部署显式清空 `DATABASE_ADMIN_URL`，避免从通用 `.env`/Kubernetes Secret 继承 owner 连接；Compose 配置和 Kustomize 渲染均通过，真实 PostgreSQL 角色创建和控制器运行仍需 Docker/CI 环境验证。
+
 ## 2026-10-23：多副本启动与租户并发开通保护
 
 - PostgreSQL API 多副本启动时使用事务级 advisory lock 串行执行 bootstrap，避免默认租户、角色和渠道种子数据竞态。
@@ -26,7 +32,7 @@
 
 ## 2026-10-23：Python 3.12 回归验证
 
-- 使用项目依赖和 Python 3.12.12 本地执行 `backend/tests`：82 passed，服务层覆盖率 41.60%，超过当前 CI 20% 门禁。
+- 使用项目依赖和 Python 3.12.12 本地执行 `backend/tests`：84 passed，服务层覆盖率 41.76%，超过当前 CI 20% 门禁。
 - 增加 `tzdata` 固定依赖，确保 Windows/Python 环境也能解析 Cron 的 `Asia/Shanghai` 等时区。
 
 ## 2026-10-23：前端流式解析回归测试

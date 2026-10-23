@@ -14,6 +14,7 @@ def test_kubernetes_secret_example_documents_production_guard_inputs():
     for field in (
         "APP_ENV",
         "APP_SECRET_KEY",
+        "CONTROLLER_DATABASE_URL",
         "BOOTSTRAP_ADMIN_PASSWORD",
         "TRUSTED_HOSTS",
         "ALLOWED_HTTP_HOSTS",
@@ -32,7 +33,7 @@ def test_all_production_process_entrypoints_use_shared_startup_guard():
     root = Path(__file__).parents[1] / "app"
     for filename in ("main.py", "worker.py", "application_controller.py", "sandbox_controller.py"):
         source = (root / filename).read_text(encoding="utf-8")
-        assert "validate_startup" in source
+        assert "validate_startup" in source or "validate_controller_startup" in source
 
 
 def test_backup_delivery_contract_is_wired_to_kubernetes_secret():
@@ -40,6 +41,15 @@ def test_backup_delivery_contract_is_wired_to_kubernetes_secret():
     assert "BACKUP_S3_URI" in cronjob
     assert "optional: true" in cronjob
     assert "DR_BACKUP_IMAGE" in (Path(__file__).parents[2] / "deploy" / "backup" / "dr-test.sh").read_text(encoding="utf-8")
+
+
+def test_controller_database_identity_is_separate_from_migration_owner():
+    provision = (Path(__file__).parents[2] / "deploy" / "postgres" / "provision-runtime.sh").read_text(encoding="utf-8")
+    compose = (Path(__file__).parents[2] / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "platform_controller" in provision
+    assert "BYPASSRLS" in provision
+    assert "CONTROLLER_DATABASE_URL" in compose
+    assert "POSTGRES_CONTROLLER_PASSWORD" in compose
 
 
 def test_public_callback_outbox_has_operational_metrics_and_alerts():
@@ -138,3 +148,48 @@ async def test_production_runtime_database_role_rejects_superuser(monkeypatch):
     monkeypatch.setattr(startup_guard, "get_settings", lambda: Settings(app_env="production"))
     with pytest.raises(RuntimeError, match="must not be a PostgreSQL superuser"):
         await startup_guard.validate_database_runtime_role()
+
+
+@pytest.mark.asyncio
+async def test_production_controller_role_requires_non_superuser_bypassrls(monkeypatch):
+    class Result:
+        def first(self):
+            return (False, True)
+
+    class Connection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, _statement):
+            return Result()
+
+    class Engine:
+        def connect(self):
+            return Connection()
+
+    monkeypatch.setattr(startup_guard, "controller_engine", Engine())
+    monkeypatch.setattr(startup_guard, "get_settings", lambda: Settings(
+        app_env="production",
+        controller_database_url="postgresql+asyncpg://platform_controller:secret@db/platform",
+    ))
+
+    await startup_guard.validate_database_controller_role()
+
+    class SuperuserResult:
+        def first(self):
+            return (True, True)
+
+    class SuperuserConnection(Connection):
+        async def execute(self, _statement):
+            return SuperuserResult()
+
+    class SuperuserEngine:
+        def connect(self):
+            return SuperuserConnection()
+
+    monkeypatch.setattr(startup_guard, "controller_engine", SuperuserEngine())
+    with pytest.raises(RuntimeError, match="controller database role must not be a PostgreSQL superuser"):
+        await startup_guard.validate_database_controller_role()

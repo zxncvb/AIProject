@@ -87,7 +87,8 @@
 - Agent 工具白名单新增 SQLite 行为回归：待审批或停用的 MCP 服务不会加载，即使它们被写入 Agent capability 配置；MCP 列表同时返回审批人信息。
 - Redis 不可用时的登录失败锁定、密码重置一次性消费、访问令牌撤销和用户会话撤销均有降级路径回归测试，避免认证安全状态依赖缓存可用性。
 - PostgreSQL 多副本 API 启动已通过事务级 advisory lock 串行化 bootstrap；租户 slug 并发唯一冲突返回 409，避免种子竞态和错误 500。
-- Python 3.12.12 本地后端回归已执行并通过 82 个测试，服务层覆盖率为 41.60%；当前仍未达到原审计建议的核心 70%/整体 60% 目标，CI 门禁暂保持 20% 以便继续增量提升。
+- 应用/沙箱控制器已切换到独立的 `platform_controller` 非 superuser 连接，并由生产启动守卫校验 `rolsuper=false`、`rolbypassrls=true`；部署显式清空 `DATABASE_ADMIN_URL`，Compose/Kubernetes/CI 配置已同步。
+- Python 3.12.12 本地后端回归已执行并通过 84 个测试，服务层覆盖率为 41.76%；当前仍未达到原审计建议的核心 70%/整体 60% 目标，CI 门禁暂保持 20% 以便继续增量提升。
 - Cron 时区运行时补齐 `tzdata` 固定依赖，避免 Windows 运行环境缺少系统 IANA 时区库导致 DST/Cron 失败。
 
 ---

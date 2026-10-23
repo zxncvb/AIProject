@@ -34,6 +34,7 @@ jobs:
         env:
           POSTGRES_PASSWORD: ci-compose-validation-only
           POSTGRES_RUNTIME_PASSWORD: ci-runtime-validation-only
+          POSTGRES_CONTROLLER_PASSWORD: ci-controller-validation-only
           GRAFANA_ADMIN_PASSWORD: ci-grafana-validation-only
       - run: python -c "from pathlib import Path; assert 'application/json; charset=utf-8' in Path('backend/app/main.py').read_text(encoding='utf-8')"
 
@@ -69,6 +70,7 @@ jobs:
         run: |
           echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
           echo "POSTGRES_RUNTIME_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+          echo "POSTGRES_CONTROLLER_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
           echo "GRAFANA_ADMIN_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
           echo "APP_SECRET_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
           echo "APP_ENCRYPTION_KEY=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')=" >> "$GITHUB_ENV"
@@ -77,7 +79,7 @@ jobs:
       - name: 启动生产拓扑并执行迁移
         shell: bash
         run: |
-          printf 'APP_ENV=test\nAPP_SECRET_KEY=%s\nAPP_ENCRYPTION_KEY=%s\nBOOTSTRAP_ADMIN_EMAIL=%s\nBOOTSTRAP_ADMIN_PASSWORD=%s\n' "$APP_SECRET_KEY" "$APP_ENCRYPTION_KEY" "$BOOTSTRAP_ADMIN_EMAIL" "$BOOTSTRAP_ADMIN_PASSWORD" > .env
+          printf 'APP_ENV=test\nAPP_SECRET_KEY=%s\nAPP_ENCRYPTION_KEY=%s\nBOOTSTRAP_ADMIN_EMAIL=%s\nBOOTSTRAP_ADMIN_PASSWORD=%s\nPOSTGRES_CONTROLLER_PASSWORD=%s\n' "$APP_SECRET_KEY" "$APP_ENCRYPTION_KEY" "$BOOTSTRAP_ADMIN_EMAIL" "$BOOTSTRAP_ADMIN_PASSWORD" "$POSTGRES_CONTROLLER_PASSWORD" > .env
           docker compose up -d --build postgres redis qdrant migrate db-security backend worker frontend
       - name: API 与中文界面冒烟测试
         shell: bash

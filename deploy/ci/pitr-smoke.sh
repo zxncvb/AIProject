@@ -5,6 +5,7 @@ project="${COMPOSE_PROJECT_NAME:-enterprise-ai-pitr-smoke}"
 compose=(docker compose -p "$project" -f docker-compose.yml -f docker-compose.pitr.yml)
 export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-pitr-smoke-password}"
 export POSTGRES_RUNTIME_PASSWORD="${POSTGRES_RUNTIME_PASSWORD:-pitr-runtime-password}"
+export POSTGRES_CONTROLLER_PASSWORD="${POSTGRES_CONTROLLER_PASSWORD:-pitr-controller-password}"
 export GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-pitr-grafana-password}"
 export WAL_ARCHIVE_URI="${WAL_ARCHIVE_URI:-file:///var/lib/postgresql/wal-archive}"
 

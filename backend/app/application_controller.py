@@ -10,9 +10,9 @@ from kubernetes.client.rest import ApiException
 from sqlalchemy import select
 
 from .config import get_settings
-from .db import AdminSessionLocal
+from .db import ControllerSessionLocal
 from .models import ApplicationBuild, ApplicationDeployment
-from .services.startup_guard import validate_startup
+from .services.startup_guard import validate_controller_startup
 
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ async def reconcile_once(
     networking: client.NetworkingV1Api,
 ) -> None:
     namespace = get_settings().application_runtime_namespace
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         queued_builds = (await db.execute(select(ApplicationBuild).where(ApplicationBuild.status == "queued").limit(10))).scalars().all()
         for row in queued_builds:
             try:
@@ -162,7 +162,7 @@ async def reconcile_once(
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    await validate_startup()
+    await validate_controller_startup()
     load_cluster_config()
     batch = client.BatchV1Api()
     apps = client.AppsV1Api()

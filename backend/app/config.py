@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     app_encryption_key: str = ""
     database_url: str = "sqlite+aiosqlite:///./data/platform.db"
     database_admin_url: str = ""
+    controller_database_url: str = ""
     redis_url: str = "redis://redis:6379/0"
     jwt_expire_minutes: int = 480
     jwt_refresh_expire_days: int = 30

@@ -67,6 +67,8 @@ spec:
           envFrom:
             - secretRef: {name: enterprise-ai-secrets}
           env:
+            - {name: DATABASE_URL, valueFrom: {secretKeyRef: {name: enterprise-ai-secrets, key: CONTROLLER_DATABASE_URL}}}
+            - {name: DATABASE_ADMIN_URL, value: ""}
             - {name: APPLICATION_RUNTIME_NAMESPACE, value: enterprise-ai-apps}
           resources:
             requests: {cpu: "100m", memory: "256Mi"}

@@ -13,10 +13,10 @@ from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 from sqlalchemy import select
 
-from .db import AdminSessionLocal
+from .db import ControllerSessionLocal
 from .models import SandboxRun
 from .services.public_callback import enqueue_public_callback_delivery, public_callback_payload
-from .services.startup_guard import validate_startup
+from .services.startup_guard import validate_controller_startup
 
 
 NAMESPACE = os.getenv("SANDBOX_NAMESPACE", "ai-platform")
@@ -82,7 +82,7 @@ async def notify_public_callback(row: SandboxRun) -> None:
 
 
 async def reconcile_once(api: client.BatchV1Api, core_api: client.CoreV1Api | None = None) -> None:
-    async with AdminSessionLocal() as db:
+    async with ControllerSessionLocal() as db:
         submitted = (await db.execute(select(SandboxRun).where(SandboxRun.status == "submitted").limit(20))).scalars().all()
         for row in submitted:
             try:
@@ -144,7 +144,7 @@ async def reconcile_once(api: client.BatchV1Api, core_api: client.CoreV1Api | No
 
 
 async def main() -> None:
-    await validate_startup()
+    await validate_controller_startup()
     load_cluster_config()
     api = client.BatchV1Api()
     core_api = client.CoreV1Api()

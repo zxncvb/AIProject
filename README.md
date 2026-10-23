@@ -24,7 +24,7 @@
 ```powershell
 Copy-Item .env.example .env
 # 生产环境必须设置 APP_SECRET_KEY、APP_ENCRYPTION_KEY、BOOTSTRAP_ADMIN_PASSWORD、
-# POSTGRES_PASSWORD、POSTGRES_RUNTIME_PASSWORD、GRAFANA_ADMIN_PASSWORD 等密钥
+# POSTGRES_PASSWORD、POSTGRES_RUNTIME_PASSWORD、POSTGRES_CONTROLLER_PASSWORD、GRAFANA_ADMIN_PASSWORD 等密钥
 docker compose up -d --build
 ```
 
@@ -52,6 +52,7 @@ BOOTSTRAP_ADMIN_EMAIL=admin
 BOOTSTRAP_ADMIN_PASSWORD=local-admin-password-123!
 POSTGRES_PASSWORD=local-postgres-password-123!
 POSTGRES_RUNTIME_PASSWORD=local-runtime-password-123!
+POSTGRES_CONTROLLER_PASSWORD=local-controller-password-123!
 GRAFANA_ADMIN_PASSWORD=local-grafana-password-123!
 TRUSTED_HOSTS=localhost,127.0.0.1
 ALLOWED_HTTP_HOSTS=localhost,127.0.0.1
@@ -79,7 +80,7 @@ npx --prefix frontend playwright install chromium
 npm run test:e2e --prefix frontend
 ```
 
-生产环境必须使用真实随机密钥、PostgreSQL 非超级用户和固定 digest 的运行时镜像；不要把上面的本地密码用于生产。
+生产环境必须使用真实随机密钥、PostgreSQL 非超级用户和固定 digest 的运行时镜像；控制器需要单独的 `CONTROLLER_DATABASE_URL` 和 `platform_controller` 非 superuser 账号；不要把上面的本地密码用于生产。
 
 ## 本次企业能力包
 
