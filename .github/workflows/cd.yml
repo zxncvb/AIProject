@@ -118,12 +118,15 @@ jobs:
         run: |
           mkdir -p "$HOME/.kube"
           echo "$KUBE_CONFIG_DATA" | base64 -d > "$HOME/.kube/config"
-          kubectl apply -k deploy/k8s
+          # Create only the namespaces required by the migration first. The
+          # application deployments are applied after the schema is current.
+          kubectl apply -f deploy/k8s/namespace.yaml -f deploy/k8s/application-runtime-namespace.yaml
           kubectl -n enterprise-ai delete job enterprise-ai-migrate --ignore-not-found
           kubectl -n enterprise-ai create job enterprise-ai-migrate --image=${{ needs.images.outputs.tag }}-backend --dry-run=client -o yaml -- /usr/local/bin/alembic -c /app/alembic.ini upgrade head > /tmp/enterprise-ai-migrate.yaml
           kubectl -n enterprise-ai set env --local -f /tmp/enterprise-ai-migrate.yaml --from=secret/enterprise-ai-secrets -o yaml | kubectl apply -f -
           kubectl -n enterprise-ai patch job enterprise-ai-migrate --type=merge -p '{"spec":{"backoffLimit":0,"ttlSecondsAfterFinished":86400}}'
           kubectl -n enterprise-ai wait --for=condition=complete job/enterprise-ai-migrate --timeout=180s
+          kubectl apply -k deploy/k8s
           kubectl -n enterprise-ai set image deployment/enterprise-ai-backend backend=${{ needs.images.outputs.tag }}-backend
           kubectl -n enterprise-ai set image deployment/enterprise-ai-worker worker=${{ needs.images.outputs.tag }}-backend
           kubectl -n enterprise-ai set image deployment/sandbox-controller controller=${{ needs.images.outputs.tag }}-backend
