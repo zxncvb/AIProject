@@ -33,6 +33,27 @@ class AgentDatabase:
                 value.id = "generated-id"
 
 
+class ExecuteResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalars(self):
+        return self
+
+    def first(self):
+        return self.value
+
+
+class SyncAgentDatabase(AgentDatabase):
+    def __init__(self, agent, provider):
+        super().__init__(agent, provider)
+        self.values = iter((agent, None, 0))
+        self.provider = provider
+
+    async def execute(self, _statement):
+        return ExecuteResult(self.provider)
+
+
 class FakeRateRedis:
     @classmethod
     def from_url(cls, *_args, **_kwargs):
@@ -149,6 +170,75 @@ async def test_agent_stream_endpoint_emits_tool_trace_and_persists_completion(mo
     finally:
         main.app.dependency_overrides.pop(get_db, None)
         main.app.dependency_overrides.pop(get_context, None)
+
+
+@pytest.mark.asyncio
+async def test_agent_chat_endpoint_uses_configured_prompt_template(monkeypatch):
+    agent = SimpleNamespace(
+        id="agent-1",
+        tenant_id="tenant-1",
+        project_id="project-1",
+        provider_id="provider-1",
+        enabled=True,
+        knowledge_base_id=None,
+        system_prompt="Fallback system prompt.",
+    )
+    provider = SimpleNamespace(id="provider-1", enabled=True)
+    database = SyncAgentDatabase(agent, provider)
+    context = SimpleNamespace(user_id="user-1", tenant_id="tenant-1", role="operator")
+    config = SimpleNamespace(
+        agent_type="chat",
+        memory_json={"enabled": False},
+        prompt_template="You are {{role}} for {{company}}.",
+        variables_json=[{"name": "role", "default": "support"}, {"name": "company", "default": "Acme"}],
+    )
+    seen_messages = []
+
+    async def no_op(*_args, **_kwargs):
+        return None
+
+    async def fake_tenant_policy(*_args, **_kwargs):
+        return SimpleNamespace(safety_json={})
+
+    async def fake_agent_config(*_args, **_kwargs):
+        return config
+
+    async def fake_run(*args, **_kwargs):
+        seen_messages.append(args[1])
+        return {
+            "text": "Hello",
+            "usage": {"total_tokens": 4},
+            "provider_id": "provider-1",
+            "model": "test-model",
+            "tool_trace": [],
+            "tool_rounds": 0,
+        }
+
+    async def fake_cost_center(*_args, **_kwargs):
+        return "agent"
+
+    monkeypatch.setattr(main, "enforce_monthly_budget", no_op)
+    monkeypatch.setattr(main, "require_project_access", no_op)
+    monkeypatch.setattr(main, "tenant_policy", fake_tenant_policy)
+    monkeypatch.setattr(main, "inspect_text", lambda text, _policy: {"blocked": False, "text": text, "reasons": []})
+    monkeypatch.setattr(main, "get_or_create_agent_config", fake_agent_config)
+    monkeypatch.setattr(main, "load_agent_conversation", no_op)
+    monkeypatch.setattr(main, "load_agent_memories", no_op)
+    monkeypatch.setattr(main, "run_agent_loop", fake_run)
+    monkeypatch.setattr(main, "resolve_cost_center", fake_cost_center)
+    monkeypatch.setattr(main, "audit", no_op)
+
+    result = await main.chat_agent(
+        "agent-1",
+        SimpleNamespace(message="hello", conversation=[], conversation_id=None, cost_center="agent"),
+        context,
+        database,
+    )
+
+    assert result["text"] == "Hello"
+    assert seen_messages[0][0]["content"] == "You are support for Acme."
+    assert any(getattr(item, "event_type", "") == "message" for item in database.added)
+    assert database.commits == 1
 
 
 @pytest.mark.asyncio

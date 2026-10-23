@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "dev": "vite",
     "build": "vite build",
     "test": "node --test tests/*.test.mjs",
     "test:e2e": "playwright test -c playwright.config.mjs"
