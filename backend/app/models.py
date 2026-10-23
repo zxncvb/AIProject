@@ -542,6 +542,26 @@ class ApplicationAccessLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class PublicCallbackDelivery(Base):
+    __tablename__ = "public_callback_deliveries"
+    __table_args__ = (UniqueConstraint("tenant_id", "kind", "run_id", name="uq_public_callback_delivery_run"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(30), index=True)
+    run_id: Mapped[str] = mapped_column(String(36), index=True)
+    callback_url: Mapped[str] = mapped_column(String(2000))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    response_status: Mapped[int] = mapped_column(Integer, default=0)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class ComputeQuota(Base):
     __tablename__ = "compute_quotas"
     __table_args__ = (UniqueConstraint("tenant_id", name="uq_compute_quota_tenant"),)

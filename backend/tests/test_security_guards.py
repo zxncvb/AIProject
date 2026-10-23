@@ -42,6 +42,15 @@ def test_backup_delivery_contract_is_wired_to_kubernetes_secret():
     assert "DR_BACKUP_IMAGE" in (Path(__file__).parents[2] / "deploy" / "backup" / "dr-test.sh").read_text(encoding="utf-8")
 
 
+def test_public_callback_outbox_has_operational_metrics_and_alerts():
+    source = (Path(__file__).parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    rules = (Path(__file__).parents[2] / "deploy" / "observability" / "rules" / "public-callback.yml").read_text(encoding="utf-8")
+    assert "public_callback_pending" in source
+    assert "public_callback_failed" in source
+    assert "EnterpriseAIPublicCallbackBacklog" in rules
+    assert "EnterpriseAIPublicCallbackFailed" in rules
+
+
 def test_production_defaults_fail_fast_and_safe_settings_pass():
     with pytest.raises(RuntimeError, match="APP_SECRET_KEY"):
         validate_runtime_settings(Settings(app_env="production"))

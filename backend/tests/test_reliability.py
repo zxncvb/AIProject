@@ -189,11 +189,11 @@ async def test_agent_stream_failure_persists_partial_usage_and_audit(monkeypatch
 async def test_public_workflow_callback_is_sent_after_terminal_state(monkeypatch):
     sent = []
 
-    async def fake_deliver(url, payload):
-        sent.append((url, payload))
-        return {"delivered": True, "attempts": 1, "status_code": 200}
+    async def fake_enqueue(**kwargs):
+        sent.append((kwargs["callback_url"], kwargs["payload"]))
+        return "delivery-1"
 
-    monkeypatch.setattr(workflow, "deliver_public_callback", fake_deliver)
+    monkeypatch.setattr(workflow, "enqueue_public_callback_delivery", fake_enqueue)
     row = SimpleNamespace(
         id="run-1",
         tenant_id="tenant-1",

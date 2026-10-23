@@ -12,6 +12,20 @@
 
 - 新增灾备配置测试和 `deploy/ci/pitr-smoke.sh`；CI 会切换 WAL 并等待 `pg_stat_archiver.archived_count` 增长。
 - 本地已通过 Compose 配置校验、Python 编译和配置测试；真实 Docker/客户 S3 恢复演练仍需 CI 或目标环境执行。
+
+## 2026-10-23：公开应用回调可靠投递
+
+### 功能修改
+
+- 新增 `public_callback_deliveries` outbox，公开应用终态回调先持久化，再由 Worker 发送。
+- 回调失败支持租约、指数退避和最大尝试次数；进程重启或短暂网络故障不会丢失待投递结果。
+- 每次投递携带稳定的 `X-Enterprise-AI-Delivery-ID`，接收方可按投递 ID 幂等去重。
+
+## 2026-10-23：审计日志追加写保护
+
+- 新增 append-only 数据库触发器，禁止更新或删除已写入的 `audit_events`，与哈希链共同提供篡改检测和删除保护。
+- Prometheus 新增公开应用回调积压/耗尽重试指标及告警规则。
+- 新增迁移、RLS 策略和失败重入测试；签名结果轮询仍作为最终事实来源。
 ## 2026-10-22：知识库资产改名
 
 ### 功能修改

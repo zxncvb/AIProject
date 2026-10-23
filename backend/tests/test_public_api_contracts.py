@@ -124,6 +124,36 @@ def test_public_callback_is_allowlisted_and_signed_payload_is_stable(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_public_callback_delivery_id_is_sent_for_idempotency(monkeypatch):
+    captured = {}
+
+    class Response:
+        status_code = 202
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, **kwargs):
+            captured.update(kwargs)
+            return Response()
+
+    monkeypatch.setattr(public_callback.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr(public_callback, "validate_public_callback_url", lambda value: value)
+    monkeypatch.setattr(public_callback, "get_settings", lambda: SimpleNamespace(publication_signing_secret="secret", app_secret_key="fallback"))
+    result = await public_callback.deliver_public_callback("https://hooks.example.com/result", {"run_id": "run-1"}, delivery_id="delivery-1")
+
+    assert result["delivered"] is True
+    assert captured["headers"]["X-Enterprise-AI-Delivery-ID"] == "delivery-1"
+
+
+@pytest.mark.asyncio
 async def test_public_result_rate_limit_uses_tenant_and_run_scope(monkeypatch):
     calls = []
 
@@ -141,3 +171,51 @@ async def test_public_result_rate_limit_uses_tenant_and_run_scope(monkeypatch):
     await main.enforce_public_result_rate_limit("tenant-1", "run-1", request)
     assert calls and "ai_platform:public_result:tenant-1:" in calls[0]
     assert "198.51.100.10" in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_public_callback_outbox_requeues_failed_delivery(monkeypatch):
+    row = SimpleNamespace(
+        id="delivery-1",
+        callback_url="https://hooks.example.com/result",
+        payload_json={"run_id": "run-1"},
+        status="queued",
+        attempts=0,
+        next_attempt_at=public_callback.utcnow(),
+        lease_until=None,
+        last_error="",
+        response_status=0,
+        delivered_at=None,
+    )
+
+    class Session:
+        def __init__(self):
+            self.calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def scalar(self, _statement):
+            self.calls += 1
+            return row
+
+        async def commit(self):
+            return None
+
+    sessions = iter([Session(), Session()])
+    monkeypatch.setattr(public_callback, "AdminSessionLocal", lambda: next(sessions))
+
+    async def failed_delivery(_url, _payload):
+        return {"delivered": False, "status_code": 503, "error": "temporary outage"}
+
+    monkeypatch.setattr(public_callback, "deliver_public_callback", failed_delivery)
+    result = await public_callback.deliver_public_callback_delivery("delivery-1")
+
+    assert result["delivered"] is False
+    assert row.status == "queued"
+    assert row.attempts == 1
+    assert row.response_status == 503
+    assert row.last_error == "temporary outage"

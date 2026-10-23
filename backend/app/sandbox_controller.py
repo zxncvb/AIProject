@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from .db import AdminSessionLocal
 from .models import SandboxRun
-from .services.public_callback import deliver_public_callback, public_callback_payload
+from .services.public_callback import enqueue_public_callback_delivery, public_callback_payload
 from .services.startup_guard import validate_startup
 
 
@@ -62,9 +62,12 @@ async def notify_public_callback(row: SandboxRun) -> None:
     if not callback_url:
         return
     try:
-        result = await deliver_public_callback(
-            callback_url,
-            public_callback_payload(
+        await enqueue_public_callback_delivery(
+            kind="sandbox",
+            run_id=row.id,
+            tenant_id=row.tenant_id,
+            callback_url=callback_url,
+            payload=public_callback_payload(
                 kind="sandbox",
                 run_id=row.id,
                 tenant_id=row.tenant_id,
@@ -74,10 +77,8 @@ async def notify_public_callback(row: SandboxRun) -> None:
                 finished_at=row.finished_at,
             ),
         )
-        if not result.get("delivered"):
-            logger.warning("public sandbox callback was not delivered run_id=%s", row.id)
     except Exception:
-        logger.exception("public sandbox callback failed run_id=%s", row.id)
+        logger.exception("public sandbox callback was not queued run_id=%s", row.id)
 
 
 async def reconcile_once(api: client.BatchV1Api, core_api: client.CoreV1Api | None = None) -> None:

@@ -38,6 +38,7 @@ from .models import (
     AgentMemory,
     Application,
     ApplicationAccessLog,
+    PublicCallbackDelivery,
     ApplicationBuild,
     ApplicationDeployment,
     ApplicationVersion,
@@ -183,7 +184,7 @@ from .services.llm import call_chat, call_routed_chat
 from .services.mailer import send_email
 from .services.agent_runtime import run_agent_loop, stream_agent_loop, validate_agent_type
 from .services.oidc import OIDCError, create_authorization_url, exchange_code
-from .services.observability import application_deployment_failed, approval_pending, job_dead_messages, job_queue_messages, metrics_payload, publication_failed, setup_telemetry
+from .services.observability import application_deployment_failed, approval_pending, job_dead_messages, job_queue_messages, metrics_payload, public_callback_failed, public_callback_pending, publication_failed, setup_telemetry
 from .services.rate_limit import allow_local
 from .services.safety import inspect_text
 from .services.vector import embed
@@ -518,6 +519,8 @@ async def refresh_operational_metrics() -> None:
                 publication_failed.set(await db.scalar(select(func.count()).select_from(PublishDelivery).where(PublishDelivery.status.in_(["failed", "dead"]))) or 0)
                 application_deployment_failed.set(await db.scalar(select(func.count()).select_from(ApplicationDeployment).where(ApplicationDeployment.status == "failed")) or 0)
                 approval_pending.set(await db.scalar(select(func.count()).select_from(ApprovalRequestModel).where(ApprovalRequestModel.status == "pending")) or 0)
+                public_callback_pending.set(await db.scalar(select(func.count()).select_from(PublicCallbackDelivery).where(PublicCallbackDelivery.status.in_(["queued", "sending"]))) or 0)
+                public_callback_failed.set(await db.scalar(select(func.count()).select_from(PublicCallbackDelivery).where(PublicCallbackDelivery.status == "failed")) or 0)
         except asyncio.CancelledError:
             raise
         except Exception:

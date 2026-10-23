@@ -24,7 +24,7 @@ from .observability import new_trace_id, run_failures, run_span, runs_total, too
 from .safety import inspect_text
 from .sandbox import build_job_manifest
 from .publication import deliver as deliver_publication
-from .public_callback import deliver_public_callback, public_callback_payload
+from .public_callback import deliver_due_public_callbacks, enqueue_public_callback_delivery, public_callback_payload
 
 
 QUEUE = "ai_platform:workflow_runs"
@@ -63,13 +63,11 @@ async def notify_public_callback(run: WorkflowRun, *, kind: str = "workflow") ->
         finished_at=run.finished_at,
     )
     try:
-        result = await deliver_public_callback(callback_url, payload)
-        if not result.get("delivered"):
-            logger.warning("public workflow callback was not delivered run_id=%s", run.id)
+        await enqueue_public_callback_delivery(kind=kind, run_id=run.id, tenant_id=run.tenant_id, callback_url=callback_url, payload=payload)
     except Exception:
         # The signed result endpoint remains the source of truth; a callback
         # outage must not turn a successful workflow into a failed workflow.
-        logger.exception("public workflow callback failed run_id=%s", run.id)
+        logger.exception("public workflow callback was not queued run_id=%s", run.id)
 
 
 def _cron_field(value: str, minimum: int, maximum: int) -> set[int]:
@@ -767,6 +765,10 @@ async def worker_loop() -> None:
             await dispatch_schedules(redis)
             await dispatch_publication_deliveries(redis)
             await reconcile_gpu_leases()
+            try:
+                await deliver_due_public_callbacks()
+            except Exception:
+                logging.getLogger("enterprise_ai_platform.worker").exception("public callback outbox drain failed")
 
             claimed = await redis.xautoclaim(
                 settings.job_stream,

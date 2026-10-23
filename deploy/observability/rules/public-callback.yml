@@ -1,0 +1,19 @@
+groups:
+  - name: enterprise-ai-public-callbacks
+    rules:
+      - alert: EnterpriseAIPublicCallbackBacklog
+        expr: ai_platform_public_callback_pending > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "公开应用回调投递积压"
+          description: "公开应用回调存在待投递记录超过 10 分钟。"
+      - alert: EnterpriseAIPublicCallbackFailed
+        expr: ai_platform_public_callback_failed > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "公开应用回调投递失败"
+          description: "公开应用回调已耗尽重试次数，需要检查目标端点和签名配置。"
