@@ -4,6 +4,7 @@ set -Eeuo pipefail
 base_url="${PLATFORM_BASE_URL:-http://127.0.0.1:18080}"
 : "${BOOTSTRAP_ADMIN_EMAIL:?缺少 BOOTSTRAP_ADMIN_EMAIL}"
 : "${BOOTSTRAP_ADMIN_PASSWORD:?缺少 BOOTSTRAP_ADMIN_PASSWORD}"
+tenant_slug="${BOOTSTRAP_TENANT_SLUG:-acme}"
 for _ in $(seq 1 90); do
   if curl --fail --silent "$base_url/readyz" >/dev/null; then break; fi
   sleep 2
@@ -53,7 +54,7 @@ app_slug="ci-public-async-$(date +%s)"
 app_json="$(curl --fail --silent --show-error "${auth[@]}" -H 'Content-Type: application/json' -d "$(jq -n --arg project_id "$project_id" --arg slug "$app_slug" --arg workflow_id "$workflow_id" '{project_id:$project_id,name:"CI Public Async App",slug:$slug,app_type:"low_code",runtime:{public:true,input_schema:{type:"object",required:["answer"],properties:{answer:{type:"string",maxLength:200}}},workflow_id:$workflow_id,actions:[{type:"workflow",workflow_id:$workflow_id,input:"{{input}}"}]},source:{}}')" "$base_url/api/applications")"
 app_id="$(echo "$app_json" | jq -er '.id')"
 curl --fail --silent --show-error "${auth[@]}" -X POST "$base_url/api/applications/$app_id/deploy" | jq -e '.status == "deployed"' >/dev/null
-invoke_json="$(curl --fail --silent --show-error -H 'Content-Type: application/json' -d '{"input":{"answer":"async-result-ok"}}' "$base_url/api/v1/public/apps/acme/$app_slug/invoke")"
+invoke_json="$(curl --fail --silent --show-error -H 'Content-Type: application/json' -d '{"input":{"answer":"async-result-ok"}}' "$base_url/api/v1/public/apps/$tenant_slug/$app_slug/invoke")"
 result_token="$(echo "$invoke_json" | jq -er '.result_token')"
 result_json=''
 for _ in $(seq 1 60); do

@@ -72,6 +72,9 @@ jobs:
       - name: API 与中文界面冒烟测试
         shell: bash
         run: ./deploy/ci/smoke-test.sh
+      - name: PostgreSQL RLS 跨租户冒烟测试
+        shell: bash
+        run: ./deploy/ci/rls-smoke.sh
       - name: 负载与 SLO 门禁
         uses: grafana/setup-k6-action@v1
       - run: k6 run deploy/ci/load-test.js
