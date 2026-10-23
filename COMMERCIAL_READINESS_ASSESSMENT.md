@@ -78,6 +78,7 @@
 - Playwright 另覆盖无模型依赖的模拟 Agent SSE 链路，验证工具轨迹和最终答案渲染；真实模型/工具提供商链路仍需 CI 或客户环境验收。
 - 模拟 SSE 浏览器用例已在本地 Vite 服务实际通过；真实 Compose 登录、数据库、Redis 和模型链路仍需 CI/目标环境验收。
 - 前端 Docker 构建、普通 CI 和集成 E2E 均改用 `npm ci`，并已通过锁文件 dry-run、Node 测试和生产构建验证。
+- 新增 HTTP API 安全契约测试，覆盖 request-id、安全响应头和生产 `/docs`、`/redoc`、`/openapi.json` 不注册；Python 3.12 CI 执行结果仍待远端流水线确认。
 - 公开结果轮询新增查询结果的显式租户/应用绑定校验，并增加 ASGI 集成用例验证成功结果和错误绑定拒绝。
 - 回调 outbox 增加并发唯一键冲突回查，多个 Worker 同时处理同一终态时复用已有投递记录；真实 PostgreSQL 并发演练仍需 CI/客户环境验证。
 
