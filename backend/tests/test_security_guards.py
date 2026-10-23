@@ -73,7 +73,7 @@ def test_worker_and_background_delivery_paths_do_not_use_admin_database_role():
 def test_public_runtime_endpoints_use_controller_database_dependency():
     source = (Path(__file__).parents[1] / "app" / "main.py").read_text(encoding="utf-8")
     assert "get_controller_db" in source
-    for marker in ("public_run_result", "public_application_runtime", "invoke_public_application"):
+    for marker in ("public_run_result", "public_application_runtime", "invoke_public_application", "trigger_workflow_webhook"):
         start = source.index(f"async def {marker}")
         end = source.find("\nasync def ", start + 1)
         section = source[start:] if end < 0 else source[start:end]

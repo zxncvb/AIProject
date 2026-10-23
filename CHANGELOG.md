@@ -388,3 +388,7 @@
 
 - 公开应用运行时、调用入口和异步结果查询改用 `get_controller_db`，不再通过迁移 owner/admin 连接访问跨租户运行数据。
 - Compose 后端显式注入 `CONTROLLER_DATABASE_URL`；新增 API 契约测试验证三类公开入口均使用控制器数据库依赖。
+## 2026-10-23：外部工作流 Webhook 权限收紧
+
+- 外部工作流 Webhook 触发入口改用 `get_controller_db`，与公开应用运行和结果查询保持一致，不再使用迁移 owner/admin 连接。
+- 安全契约测试覆盖 Webhook、公开运行时、公开调用和结果查询四类外部入口。

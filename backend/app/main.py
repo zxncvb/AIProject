@@ -3683,7 +3683,7 @@ async def get_workflow_webhook_token(workflow_id: str, ctx: EditorContext, db: A
 
 
 @app.post("/api/workflows/{workflow_id}/webhook")
-async def trigger_workflow_webhook(workflow_id: str, body: WorkflowWebhookRequest, x_workflow_token: str | None = Header(default=None), db: AsyncSession = Depends(get_admin_db)):
+async def trigger_workflow_webhook(workflow_id: str, body: WorkflowWebhookRequest, x_workflow_token: str | None = Header(default=None), db: AsyncSession = Depends(get_controller_db)):
     workflow = await db.scalar(select(Workflow).where(Workflow.id == workflow_id, Workflow.status == "published"))
     if not workflow or not x_workflow_token or not hmac.compare_digest(x_workflow_token, workflow_webhook_token(workflow.id)):
         raise HTTPException(status_code=404, detail="工作流不存在或 Webhook 凭证无效")

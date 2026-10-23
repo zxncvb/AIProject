@@ -560,3 +560,9 @@ README 中有三处表述高于当前实现，建议在售前材料和验收文�
 - 公开应用运行时、调用入口和异步结果查询已改用 `get_controller_db`，不再通过迁移 owner/admin 连接访问跨租户运行数据。
 - Compose 后端显式注入 `CONTROLLER_DATABASE_URL`；API 契约测试覆盖运行时、调用和结果查询三类入口。
 - 本批验证：后端 `86 passed`，服务层覆盖率 `41.76%`，Python 编译、Compose 配置和 Kubernetes Kustomize 渲染均通过。
+---
+
+## 2026-10-23 追加复核：外部工作流 Webhook 权限收紧
+
+- 外部工作流 Webhook 触发入口已改用 `get_controller_db`，与公开应用运行、调用和结果查询保持一致。
+- 安全契约测试覆盖四类外部入口，避免迁移 owner/admin 连接进入外部运行链路。
