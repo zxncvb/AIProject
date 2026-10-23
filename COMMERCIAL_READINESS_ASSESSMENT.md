@@ -617,3 +617,10 @@ README 中有三处表述高于当前实现，建议在售前材料和验收文�
 
 - 修复全代码公开应用在 Worker 生成受限 Job manifest 失败时只更新轮询状态、不投递 callback 的缺口；失败终态现在复用公开回调 outbox。
 - 新增 Worker 失败分支回归，确认状态、错误信息和回调投递同时完成。
+
+---
+
+## 2026-10-23 追加复核：API 控制器数据库启动守卫
+
+- 修复 API lifespan 只校验普通运行时数据库角色、未校验控制器角色的启动缺口。
+- API、Worker、Application Controller 和 Sandbox Controller 现在统一执行控制器角色守卫；生产环境会拒绝缺失、超级用户或未显式 `BYPASSRLS` 的控制器连接。

@@ -423,3 +423,8 @@
 ## 2026-10-23：全代码 Sandbox 失败回调闭环
 
 - 修复 SandboxRun 在 Worker 生成受限 Kubernetes Job 失败时未投递 `callback_url` 的缺口；失败终态现在统一进入公开回调 outbox，并新增失败分支回归测试。
+
+## 2026-10-23：API 控制器数据库启动守卫
+
+- API lifespan 现在调用 `validate_controller_startup()`，生产启动时同时校验运行时角色非 superuser，以及 `CONTROLLER_DATABASE_URL` 角色为非 superuser 且显式具备 `BYPASSRLS`。
+- 新增回归断言，防止 API 进程退回只校验普通运行时数据库角色。

@@ -35,6 +35,8 @@ def test_all_production_process_entrypoints_use_shared_startup_guard():
     for filename in ("main.py", "worker.py", "application_controller.py", "sandbox_controller.py"):
         source = (root / filename).read_text(encoding="utf-8")
         assert "validate_startup" in source or "validate_controller_startup" in source
+    main_source = (root / "main.py").read_text(encoding="utf-8")
+    assert "await validate_controller_startup()" in main_source
 
 
 def test_backup_delivery_contract_is_wired_to_kubernetes_secret():
