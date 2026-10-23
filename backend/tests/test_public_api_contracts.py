@@ -5,7 +5,8 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app import main
-from app.db import get_controller_db
+from app.db import get_controller_db, get_db
+from app.deps import get_context
 from app.services import public_callback
 
 
@@ -147,6 +148,50 @@ async def test_public_result_token_is_bound_to_tenant_application_and_run(monkey
             assert response.status_code == 404
     finally:
         main.app.dependency_overrides.pop(get_controller_db, None)
+
+
+@pytest.mark.asyncio
+async def test_public_result_token_revocation_closes_the_http_loop(monkeypatch):
+    class RevocationRedis(FakeRedis):
+        revoked = set()
+
+        async def setex(self, key, _ttl, _value):
+            self.revoked.add(key)
+
+        async def exists(self, key):
+            return int(key in self.revoked)
+
+    database = FakeDatabase()
+    context = SimpleNamespace(tenant_id="tenant-1", user_id="admin-1", role="admin", custom_permissions=())
+
+    async def override_db():
+        yield database
+
+    async def override_context():
+        return context
+
+    async def no_op_audit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(main, "Redis", RevocationRedis)
+    monkeypatch.setattr(main, "audit", no_op_audit)
+    main.app.dependency_overrides[get_db] = override_db
+    main.app.dependency_overrides[get_controller_db] = override_db
+    main.app.dependency_overrides[get_context] = override_context
+    try:
+        token = main.create_public_result_token("workflow", "run-1", "tenant-1", "app-1")
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            revoked = await client.post("/api/public/result-tokens/revoke", json={"result_token": token})
+            assert revoked.status_code == 200
+            assert revoked.json()["revoked"] is True
+
+            result = await client.get(f"/api/v1/public/runs/{token}")
+            assert result.status_code == 410
+    finally:
+        main.app.dependency_overrides.pop(get_db, None)
+        main.app.dependency_overrides.pop(get_controller_db, None)
+        main.app.dependency_overrides.pop(get_context, None)
 
 
 def test_public_callback_is_allowlisted_and_signed_payload_is_stable(monkeypatch):

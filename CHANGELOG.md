@@ -396,3 +396,6 @@
 
 - 新增 FastAPI API 层 SSE 回归测试，覆盖 API Key scope、权限依赖、`text/event-stream` 响应，以及 `token`、`tool_call`、`tool_result`、`done` 事件。
 - 测试同时验证流式完成后的 AgentEvent 和 ComputeUsage 持久化，避免只验证运行时生成器而遗漏路由层闭环。
+## 2026-10-23：公开结果令牌撤销闭环回归
+
+- 新增 HTTP 回归测试，验证管理员撤销结果令牌后，Redis 撤销标记生效，公开结果查询返回 `410 Gone`。
