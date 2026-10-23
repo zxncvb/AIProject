@@ -65,6 +65,12 @@ for _ in $(seq 1 60); do
 done
 echo "$result_json" | jq -e '.status == "succeeded" and .output.value == "async-result-ok"' >/dev/null
 
+# Verify that an administrator can revoke the signed result token and that
+# the public polling endpoint immediately rejects it thereafter.
+curl --fail --silent --show-error "${auth[@]}" -H 'Content-Type: application/json' -d "$(jq -n --arg result_token "$result_token" '{result_token:$result_token}')" "$base_url/api/public/result-tokens/revoke" | jq -e '.revoked == true' >/dev/null
+revoked_status="$(curl --silent --output /dev/null --write-out '%{http_code}' "$base_url/api/v1/public/runs/$result_token")"
+test "$revoked_status" = "410"
+
 curl --fail --silent "${auth[@]}" "$base_url/api/admin/jobs/summary" | jq -e '.dead >= 0' >/dev/null
 curl --fail --silent "$base_url/metrics" | grep -q 'ai_platform_job_queue_messages'
 curl --fail --silent http://127.0.0.1:13000/ | grep -q 'lang="zh-CN"'

@@ -89,6 +89,13 @@ def test_public_callback_outbox_has_operational_metrics_and_alerts():
     assert "EnterpriseAIPublicCallbackFailed" in rules
 
 
+def test_ci_smoke_covers_public_result_token_revocation():
+    smoke = (Path(__file__).parents[2] / "deploy" / "ci" / "smoke-test.sh").read_text(encoding="utf-8")
+    assert "/api/public/result-tokens/revoke" in smoke
+    assert 'revoked_status="$(curl' in smoke
+    assert 'test "$revoked_status" = "410"' in smoke
+
+
 def test_production_defaults_fail_fast_and_safe_settings_pass():
     with pytest.raises(RuntimeError, match="APP_SECRET_KEY"):
         validate_runtime_settings(Settings(
