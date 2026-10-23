@@ -4,6 +4,9 @@
 __pycache__/
 *.pyc
 .venv/
+.venv*/
+.coverage
+coverage*.xml
 node_modules/
 dist/
 .vite/

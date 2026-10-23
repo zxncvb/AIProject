@@ -1,4 +1,6 @@
 from app.services.crypto import chunk_text
+import pytest
+
 from app.services.evaluation import parse_judge_result
 from app.services.identity import claim_values, mapped_role, parse_role_mapping
 from app.services.knowledge import normalize_metadata_filter, rerank_candidates

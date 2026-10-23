@@ -44,7 +44,7 @@ class FakeDatabase:
 
 def public_fixture():
     tenant = SimpleNamespace(id="tenant-1", slug="acme", is_active=True)
-    application = SimpleNamespace(id="app-1", slug="helpdesk", name="Helpdesk", app_type="low_code", status="deployed", created_by="user-1")
+    application = SimpleNamespace(id="app-1", slug="helpdesk", name="Helpdesk", app_type="low_code", status="deployed", created_by="user-1", public_rate_limit_per_minute=120)
     version = SimpleNamespace(
         version=3,
         status="deployed",
@@ -251,7 +251,7 @@ async def test_public_callback_outbox_requeues_failed_delivery(monkeypatch):
     sessions = iter([Session(), Session()])
     monkeypatch.setattr(public_callback, "AdminSessionLocal", lambda: next(sessions))
 
-    async def failed_delivery(_url, _payload):
+    async def failed_delivery(_url, _payload, **_kwargs):
         return {"delivered": False, "status_code": 503, "error": "temporary outage"}
 
     monkeypatch.setattr(public_callback, "deliver_public_callback", failed_delivery)

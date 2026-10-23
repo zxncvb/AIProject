@@ -1,5 +1,10 @@
 # 版本与文档修改记录
 
+## 2026-10-23：Python 3.12 回归验证
+
+- 使用项目依赖和 Python 3.12.12 本地执行 `backend/tests`：74 passed，服务层覆盖率 36.67%，超过当前 CI 20% 门禁。
+- 增加 `tzdata` 固定依赖，确保 Windows/Python 环境也能解析 Cron 的 `Asia/Shanghai` 等时区。
+
 ## 2026-10-23：前端流式解析回归测试
 
 - 将 Agent SSE 帧解析抽为 `frontend/src/agent_stream.js`，新增 Node 原生测试覆盖分片、CRLF、多行 data 和尾帧。

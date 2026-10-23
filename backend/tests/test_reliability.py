@@ -61,7 +61,8 @@ async def test_public_application_details_do_not_expose_source_or_keys():
 
     result = await public_application_runtime("tenant", "test", Database())
     assert result["authentication_required"] is True
-    assert "runtime" not in result
+    assert result["runtime"]["input_schema"] == {}
+    assert result["runtime"]["actions"] == []
     assert "source" not in result
     assert "secret-value" not in str(result)
 
@@ -133,7 +134,7 @@ async def test_reliable_queue_writes_typed_stream_message():
             return "1-0"
 
     redis = FakeRedis()
-    message_id = await enqueue_job("knowledge_index", "document-1", redis)
+    message_id = await enqueue_job("knowledge_index", "document-1", redis, tenant_id="tenant-1")
     assert message_id == "1-0"
     assert redis.call[1]["kind"] == "knowledge_index"
     assert redis.call[1]["resource_id"] == "document-1"

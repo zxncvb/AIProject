@@ -53,7 +53,13 @@ def test_public_callback_outbox_has_operational_metrics_and_alerts():
 
 def test_production_defaults_fail_fast_and_safe_settings_pass():
     with pytest.raises(RuntimeError, match="APP_SECRET_KEY"):
-        validate_runtime_settings(Settings(app_env="production"))
+        validate_runtime_settings(Settings(
+            app_env="production",
+            app_secret_key="change-me-in-production",
+            bootstrap_admin_password="ChangeMe_123456",
+            database_url="sqlite+aiosqlite:///./data/platform.db",
+            trusted_hosts="*",
+        ))
     validate_runtime_settings(Settings(app_env="test"))
 
 

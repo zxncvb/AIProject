@@ -105,8 +105,8 @@ async def test_stream_agent_loop_reassembles_tool_call_deltas_and_emits_trace(mo
     bound = agent_runtime.BoundTool("plugin_p1_lookup", "lookup", "plugin", "p1", "Orders")
     streams = iter([
         [
-            {"type": "tool_call_delta", "tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "look", "arguments": '{"id":'}}]},
-            {"type": "tool_call_delta", "tool_calls": [{"index": 0, "function": {"name": "up", "arguments": ' "42"}'}}]},
+            {"type": "tool_call_delta", "tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "plugin_p1_", "arguments": '{"id":'}}]},
+            {"type": "tool_call_delta", "tool_calls": [{"index": 0, "function": {"name": "lookup", "arguments": ' "42"}'}}]},
             {"type": "done"},
         ],
         [{"type": "text", "text": "订单已找到"}, {"type": "usage", "usage": {"total_tokens": 4}}, {"type": "done"}],
