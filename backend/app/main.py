@@ -1685,6 +1685,9 @@ async def update_member(user_id: str, body: MemberRoleUpdate, ctx: AdminContext,
         raise HTTPException(status_code=404, detail="租户成员不存在")
     if user_id == ctx.user_id and body.is_active is False:
         raise HTTPException(status_code=422, detail="不能停用当前登录账号")
+    old_role = membership.role
+    old_custom_role_id = membership.custom_role_id
+    old_membership_active = membership.is_active
     membership.role = body.role
     if body.custom_role_id is None:
         membership.custom_role_id = None
@@ -1697,9 +1700,16 @@ async def update_member(user_id: str, body: MemberRoleUpdate, ctx: AdminContext,
         membership.is_active = body.is_active
         if body.is_active:
             user.is_active = True
+    sessions_revoked = (
+        old_role != membership.role
+        or old_custom_role_id != membership.custom_role_id
+        or old_membership_active != membership.is_active
+    )
+    if sessions_revoked:
+        await revoke_user_sessions(user.id)
     await audit(db, ctx, "member.update", "membership", membership.id, {"user_id": user_id, "role": body.role, "is_active": membership.is_active and user.is_active})
     await db.commit()
-    return {"user_id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role, "custom_role_id": membership.custom_role_id, "is_active": membership.is_active and user.is_active}
+    return {"user_id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role, "custom_role_id": membership.custom_role_id, "is_active": membership.is_active and user.is_active, "sessions_revoked": sessions_revoked}
 
 
 @app.delete("/api/members/{user_id}")
@@ -1709,6 +1719,7 @@ async def remove_member(user_id: str, ctx: AdminContext, db: AsyncSession = Depe
     membership = await db.scalar(select(Membership).where(Membership.user_id == user_id, Membership.tenant_id == ctx.tenant_id))
     if not membership:
         raise HTTPException(status_code=404, detail="租户成员不存在")
+    await revoke_user_sessions(user_id)
     await audit(db, ctx, "member.remove", "membership", membership.id, {"user_id": user_id})
     await db.delete(membership)
     await db.commit()
