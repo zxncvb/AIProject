@@ -1,4 +1,5 @@
 from functools import lru_cache
+import re
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -120,6 +121,10 @@ class Settings(BaseSettings):
     application_registry: str = ""
     application_buildkit_image: str = "moby/buildkit:v0.20.2-rootless"
     application_runtime_class: str = ""
+    sandbox_node_image: str = ""
+    sandbox_python_image: str = ""
+    sandbox_go_image: str = ""
+    sandbox_java_image: str = ""
     publication_signing_secret: str = ""
     public_app_default_rate_limit: int = 120
 
@@ -179,6 +184,17 @@ def validate_runtime_settings(settings: Settings) -> None:
         errors.append('S3_BUCKET is required when STORAGE_BACKEND=s3')
     if settings.smtp_host and not settings.smtp_from:
         errors.append('SMTP_FROM is required when SMTP_HOST is configured')
+    immutable_images = {
+        'APPLICATION_BUILDKIT_IMAGE': settings.application_buildkit_image,
+        'SANDBOX_NODE_IMAGE': settings.sandbox_node_image,
+        'SANDBOX_PYTHON_IMAGE': settings.sandbox_python_image,
+        'SANDBOX_GO_IMAGE': settings.sandbox_go_image,
+        'SANDBOX_JAVA_IMAGE': settings.sandbox_java_image,
+    }
+    for name, image in immutable_images.items():
+        digest = image.rsplit('@sha256:', 1)[-1] if '@sha256:' in image else ''
+        if not re.fullmatch(r'[0-9a-fA-F]{64}', digest):
+            errors.append(f'{name} must use an immutable image digest in production')
     if errors:
         raise RuntimeError('Unsafe production configuration: ' + '; '.join(errors))
 

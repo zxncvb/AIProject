@@ -92,6 +92,13 @@ async def search_chunks(
     for key, value in normalized_filter.items():
         column = SEARCH_METADATA_FIELDS[key]
         statement = statement.where(column.in_(value) if isinstance(value, list) else column == value)
+    allowed_document_ids: set[str] | None = None
+    if normalized_filter:
+        document_statement = select(Document.id).where(Document.tenant_id == tenant_id, Document.kb_id == kb_id)
+        for key, value in normalized_filter.items():
+            column = SEARCH_METADATA_FIELDS[key]
+            document_statement = document_statement.where(column.in_(value) if isinstance(value, list) else column == value)
+        allowed_document_ids = set((await db.execute(document_statement)).scalars().all())
     result = await db.execute(statement.limit(max(limit * 20, min(get_settings().knowledge_candidate_limit, 50000))))
     terms = _terms(query)
     scored: list[tuple[float, DocumentChunk]] = []
@@ -117,6 +124,8 @@ async def search_chunks(
     for row, normalized_score in zip(vector_rows, vector_scores):
         chunk_id = row.get("chunk_id")
         if not chunk_id:
+            continue
+        if allowed_document_ids is not None and row.get("document_id") not in allowed_document_ids:
             continue
         if chunk_id in merged:
             merged[chunk_id]["score"] = round(float(merged[chunk_id]["score"]) * 0.45 + normalized_score * 0.55, 6)

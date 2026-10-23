@@ -12,6 +12,17 @@ RUNTIME_IMAGES = {
 }
 
 
+def runtime_image(runtime: str) -> str:
+    settings = get_settings()
+    configured = {
+        "nodejs": settings.sandbox_node_image,
+        "python": settings.sandbox_python_image,
+        "go": settings.sandbox_go_image,
+        "java": settings.sandbox_java_image,
+    }.get(runtime, "")
+    return configured.strip() or RUNTIME_IMAGES[runtime]
+
+
 def build_job_manifest(run_id: str, runtime: str, source: dict[str, Any], timeout_seconds: int, cpu_millicores: int, memory_mb: int) -> dict[str, Any]:
     if runtime not in RUNTIME_IMAGES:
         raise ValueError("unsupported sandbox runtime")
@@ -34,7 +45,7 @@ def build_job_manifest(run_id: str, runtime: str, source: dict[str, Any], timeou
         "securityContext": {"runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532, "seccompProfile": {"type": "RuntimeDefault"}},
         "volumes": [{"name": "tmp", "emptyDir": {"sizeLimit": f"{max(64, min(settings.sandbox_ephemeral_storage_mb, 1024))}Mi"}}],
         "containers": [{
-            "name": "runner", "image": RUNTIME_IMAGES[runtime], "command": command,
+            "name": "runner", "image": runtime_image(runtime), "command": command,
             "resources": {
                 "requests": {"cpu": f"{cpu_millicores}m", "memory": f"{memory_mb}Mi"},
                 "limits": {"cpu": f"{cpu_millicores}m", "memory": f"{memory_mb}Mi", "ephemeral-storage": f"{max(64, min(settings.sandbox_ephemeral_storage_mb, 1024))}Mi"},

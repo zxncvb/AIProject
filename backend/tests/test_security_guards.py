@@ -11,6 +11,26 @@ def test_production_defaults_fail_fast_and_safe_settings_pass():
     validate_runtime_settings(Settings(app_env="test"))
 
 
+def test_production_requires_immutable_runtime_images():
+    settings = Settings(
+        app_env="production",
+        app_secret_key="a-real-secret",
+        bootstrap_admin_password="a-real-password",
+        database_url="postgresql+asyncpg://platform:password@db/platform",
+        database_admin_url="postgresql+asyncpg://platform:password@db/platform",
+        trusted_hosts="platform.example.com",
+    )
+    with pytest.raises(RuntimeError, match="SANDBOX_NODE_IMAGE"):
+        validate_runtime_settings(settings)
+    digest = "registry.example/image@sha256:" + "a" * 64
+    settings.application_buildkit_image = digest
+    settings.sandbox_node_image = digest
+    settings.sandbox_python_image = digest
+    settings.sandbox_go_image = digest
+    settings.sandbox_java_image = digest
+    validate_runtime_settings(settings)
+
+
 def test_extension_manifest_rejects_capability_outside_allowlist():
     with pytest.raises(HTTPException) as exc:
         validate_extension_manifest({"capabilities": ["shell.exec"]})
