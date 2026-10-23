@@ -277,3 +277,7 @@
 ### 公开结果查询限流
 
 - `GET /api/v1/public/runs/{result_token}` 增加按租户、结果运行和客户端 IP 的 Redis 限流；Redis 不可用时降级到进程内限流，避免公开令牌被高频轮询拖垮。
+
+### Python SDK 异步闭环
+
+- Python SDK 对租户/应用/结果令牌路径做 URL 编码，新增 `wait_for_result` 和 `invoke_and_wait`，并补充同步结果不轮询、异步结果等待终态的测试。

@@ -67,6 +67,7 @@
 - 工作流执行已接入现有 `run_span`，OpenTelemetry 可用时生成执行 span，耗时指标按租户记录；未配置 OTel 时仍输出带 trace/tenant 的调试信息。
 - 生产启动守卫已接入 API、Worker 和两个 Kubernetes 控制器：无法读取 PostgreSQL `rolsuper` 或发现业务运行账号为超级用户时 fail-fast；管理员连接仍仅供迁移/引导使用。
 - 公开结果令牌查询已增加按租户/运行/客户端 IP 的 Redis 限流，并保留本地降级路径，异步结果闭环不再只有调用入口限流。
+- Python SDK 已提供 URL 安全编码和 `invoke_and_wait` 异步终态等待方法，公开应用的调用、轮询和 SDK 使用路径保持一致。
 
 ---
 
