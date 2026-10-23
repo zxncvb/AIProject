@@ -1,8 +1,5 @@
 import React, { useEffect, useState } from "react";
-import axios from "axios";
-
-const api = axios.create({ baseURL: "/" });
-api.interceptors.request.use((config) => { const token = localStorage.getItem("eai_token"); if (token) config.headers.Authorization = `Bearer ${token}`; return config; });
+import { api } from "./api_client";
 const errorText = (error, fallback = "操作失败") => typeof error?.response?.data?.detail === "string" ? error.response.data.detail : fallback;
 const displayLabels = { draft: "草稿", published: "已发布", deployed: "已部署", archived: "已归档", pending: "待审批", approved: "已通过", rejected: "已拒绝", active: "运行中", canary: "灰度中", rolled_back: "已回滚", ready: "已就绪", failed: "失败", testing: "检测中", disconnected: "未连接", connected: "已连接", agent: "智能体", workflow: "工作流", application: "应用", skill: "技能", plugin: "插件", model: "模型", keyword: "关键词", regex: "正则", semantic: "语义" };
 const display = (value) => displayLabels[value] || value;

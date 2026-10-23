@@ -17,9 +17,12 @@ cookie_login="$(curl --fail --silent --show-error -c "$cookie_jar" -H 'Content-T
 echo "$cookie_login" | jq -e '.user.email != null and .access_token == "" and .refresh_token == null' >/dev/null
 grep -q '#HttpOnly_.*eai_access_token' "$cookie_jar"
 grep -q '#HttpOnly_.*eai_refresh_token' "$cookie_jar"
+csrf_token="$(awk '$6 == "eai_csrf_token" {print $7}' "$cookie_jar")"
+test -n "$csrf_token"
 curl --fail --silent --show-error -b "$cookie_jar" "$base_url/api/me" | jq -e '.user.email != null' >/dev/null
-curl --fail --silent --show-error -b "$cookie_jar" -c "$cookie_jar" -H 'Content-Type: application/json' -H 'X-Browser-Session: 1' -d '{}' "$base_url/api/auth/refresh" | jq -e '.user.email != null and .access_token == "" and .refresh_token == null' >/dev/null
-curl --fail --silent --show-error -b "$cookie_jar" -c "$cookie_jar" -X POST "$base_url/api/auth/logout" | jq -e '.revoked == true' >/dev/null
+curl --fail --silent --show-error -b "$cookie_jar" -c "$cookie_jar" -H "X-CSRF-Token: $csrf_token" -H 'Content-Type: application/json' -H 'X-Browser-Session: 1' -d '{}' "$base_url/api/auth/refresh" | jq -e '.user.email != null and .access_token == "" and .refresh_token == null' >/dev/null
+csrf_token="$(awk '$6 == "eai_csrf_token" {print $7}' "$cookie_jar")"
+curl --fail --silent --show-error -b "$cookie_jar" -H "X-CSRF-Token: $csrf_token" -X POST "$base_url/api/auth/logout" | jq -e '.revoked == true' >/dev/null
 curl --fail --silent "${auth[@]}" "$base_url/api/me" | jq -e '.user.email != null' >/dev/null
 curl --fail --silent --show-error "${auth[@]}" -H 'Content-Type: application/json' -d "$(jq -n --arg email "$BOOTSTRAP_ADMIN_EMAIL" '{email:$email}')" "$base_url/api/auth/password-reset/request" | jq -e '.accepted == true' >/dev/null
 invite_email="ci-invite-$(date +%s)@example.local"

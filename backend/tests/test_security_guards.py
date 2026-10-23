@@ -1,7 +1,14 @@
 import pytest
 from fastapi import HTTPException
 
+from app.config import Settings, validate_runtime_settings
 from app.main import bind_database_parameters, finops_costs, validate_extension_manifest, validate_knowledge_asset
+
+
+def test_production_defaults_fail_fast_and_safe_settings_pass():
+    with pytest.raises(RuntimeError, match="APP_SECRET_KEY"):
+        validate_runtime_settings(Settings(app_env="production"))
+    validate_runtime_settings(Settings(app_env="test"))
 
 
 def test_extension_manifest_rejects_capability_outside_allowlist():

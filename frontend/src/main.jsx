@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import axios from "axios";
+import { api } from "./api_client";
 import { Background, Controls, ReactFlow, addEdge, useEdgesState, useNodesState } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
@@ -14,25 +15,6 @@ import DatabasePolicyEditor from "./database_policy";
 import ProductionGovernance from "./production_governance";
 import { WorkspaceCenter, ModelDetail, KnowledgeAssets, DatabaseCenter, PromptCenter, WorkflowGovernance, AgentLifecycle, AgentResources, AccountCenter, AdminResources, MarketCenter, ExtensionsControl, PublishingCenter, ApprovalCenter, PlatformConsole } from "./extended_pages";
 
-localStorage.removeItem("eai_token");
-localStorage.removeItem("eai_refresh_token");
-const api = axios.create({ baseURL: "/", withCredentials: true });
-let refreshPromise = null;
-api.interceptors.response.use((response) => response, async (error) => {
-  const request = error.config;
-  if (error.response?.status !== 401 || request?._retry || request?.url?.includes("/api/auth/")) throw error;
-  request._retry = true;
-  refreshPromise ||= api.post("/api/auth/refresh", {}, { headers: { "X-Browser-Session": "1" } }).then(({ data }) => {
-    localStorage.setItem("eai_session", "1");
-    return data;
-  }).catch((refreshError) => {
-    localStorage.removeItem("eai_session");
-    throw refreshError;
-  }).finally(() => { refreshPromise = null; });
-  await refreshPromise;
-  return api(request);
-});
-
 const roleLabels = { owner: "所有者", admin: "管理员", developer: "开发者", editor: "编辑者", operator: "运营者", viewer: "查看者" };
 const statusLabels = { draft: "草稿", published: "已发布", archived: "已归档", deployed: "已部署", indexing: "索引中", ready: "已就绪", pending: "待审批", approved: "已通过", rejected: "已拒绝", queued: "排队中", running: "运行中", waiting_approval: "等待审批", succeeded: "成功", failed: "失败", cancelled: "已取消", submitted: "已提交" };
 const nodeLabels = { input: "输入", llm: "大模型", agent: "智能体", knowledge: "知识库", http: "接口请求", plugin: "插件", skill: "技能", approval: "人工审批", condition: "条件分支", loop: "循环", parallel: "并行", output: "输出" };
@@ -42,6 +24,10 @@ function errorText(error, fallback = "操作失败") {
   if (typeof detail === "string") return detail;
   if (detail?.message) return detail.message;
   return fallback;
+}
+function browserCsrfToken() {
+  const item = document.cookie.split(";").map((value) => value.trim()).find((value) => value.startsWith("eai_csrf_token="));
+  return item ? decodeURIComponent(item.slice("eai_csrf_token=".length)) : "";
 }
 function formatDate(value) {
   if (!value) return "—";
@@ -227,7 +213,7 @@ function Agents({ data, refresh }) {
   async function chat() {
     setMessage(""); setAnswer("");
     try {
-      const response = await fetch(`/api/agents/${selected}/chat/stream`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: question, conversation_id: conversationId || null }) });
+      const response = await fetch(`/api/agents/${selected}/chat/stream`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json", "X-CSRF-Token": browserCsrfToken() }, body: JSON.stringify({ message: question, conversation_id: conversationId || null }) });
       if (!response.ok) { let detail = "Agent 调用失败，请先配置模型"; try { const payload = await response.json(); detail = payload.detail?.message || payload.detail || detail; } catch (_) {} throw new Error(detail); }
       const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ""; let text = "";
       while (true) {

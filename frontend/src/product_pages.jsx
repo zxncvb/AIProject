@@ -1,12 +1,5 @@
 import React, { useEffect, useState } from "react";
-import axios from "axios";
-
-const api = axios.create({ baseURL: "/" });
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("eai_token");
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  return config;
-});
+import { api } from "./api_client";
 
 function messageOf(error, fallback = "操作失败") {
   const detail = error?.response?.data?.detail;

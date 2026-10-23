@@ -203,6 +203,7 @@
 - CD 镜像发布已增加 SBOM 生成、Trivy 高危漏洞门禁和 Cosign keyless 签名。
 - Compose 已提供可选 `kubernetes` profile，用于启动全代码应用控制器和沙箱控制器；默认开发拓扑不会在没有 Kubernetes 凭据时误启动托管控制器。
 - 浏览器认证已迁移到 HttpOnly Cookie（生产环境 Secure、SameSite=Lax），浏览器模式不再在响应 JSON 中返回 JWT；Bearer/API Key 仍保留给外部客户端，CI 冒烟测试覆盖 Cookie 访问、刷新和登出。
+- 浏览器会话新增非 HttpOnly CSRF Cookie 与 `X-CSRF-Token` 校验，前端各功能页统一使用带 Cookie/刷新拦截器的共享 API 客户端；已移除旧版 JWT localStorage 入口。
 - 应用中心已增加自定义域名、TLS Secret、应用级公开调用配额和租户隔离访问日志；全代码应用生成的 Ingress 会绑定对应域名与证书 Secret。
 - 新增无需登录的 `/apps/{tenant}/{app}` 公开应用页面，可按输入 schema 渲染表单、提交调用并轮询异步结果。
 - 公开 API 已补充最小 Python SDK（`sdk/python`），统一使用 `/api/v1/public` 版本化路径；CI 新增后端服务层覆盖率报告与 20% 门禁，并上传 `coverage.xml` 供发布验收留档。

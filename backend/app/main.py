@@ -242,11 +242,13 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str) 
     secure = settings.app_env.lower() == "production"
     response.set_cookie("eai_access_token", access_token, max_age=settings.jwt_expire_minutes * 60, httponly=True, secure=secure, samesite="lax", path="/")
     response.set_cookie("eai_refresh_token", refresh_token, max_age=settings.jwt_refresh_expire_days * 86400, httponly=True, secure=secure, samesite="lax", path="/api/auth")
+    response.set_cookie("eai_csrf_token", secrets.token_urlsafe(32), max_age=settings.jwt_refresh_expire_days * 86400, httponly=False, secure=secure, samesite="lax", path="/")
 
 
 def clear_auth_cookies(response: Response) -> None:
     response.delete_cookie("eai_access_token", path="/")
     response.delete_cookie("eai_refresh_token", path="/api/auth")
+    response.delete_cookie("eai_csrf_token", path="/")
 
 
 def make_login_response(access_token: str, refresh_token: str, user: User, membership: Membership, tenant: Tenant, *, browser_session: bool = False) -> LoginResponse:
@@ -564,6 +566,13 @@ async def security_middleware(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID") or secrets.token_hex(16)
     request.state.request_id = request_id
     started = time.perf_counter()
+    if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path.startswith("/api/") and request.cookies.get("eai_access_token"):
+        csrf_cookie = request.cookies.get("eai_csrf_token", "")
+        csrf_header = request.headers.get("X-CSRF-Token", "")
+        if not csrf_cookie or not csrf_header or not hmac.compare_digest(csrf_cookie, csrf_header):
+            response = JSONResponse({"detail": {"code": "csrf_invalid", "message": "缺少或无效的 CSRF 令牌"}}, status_code=403)
+            response.headers["X-Request-ID"] = request_id
+            return response
     if request.url.path.startswith("/api/") or request.url.path.startswith("/public/"):
         window = 60
         limit = 20 if request.url.path.startswith("/api/auth/") else (120 if request.url.path.startswith("/public/") else 300)
@@ -716,7 +725,8 @@ async def login(body: LoginRequest, response: Response, browser_session: str | N
     await db.commit()
     token = create_access_token(user.id, tenant.id, membership.role)
     refresh_token = create_refresh_token(user.id, tenant.id, membership.role)
-    set_auth_cookies(response, token, refresh_token)
+    if browser_session == "1":
+        set_auth_cookies(response, token, refresh_token)
     return make_login_response(token, refresh_token, user, membership, tenant, browser_session=browser_session == "1")
 
 
@@ -808,7 +818,8 @@ async def refresh_auth_token(body: RefreshTokenRequest, request: Request, respon
     await revoke_token(str(claims.get("jti") or ""), claims.get("exp"))
     access_token = create_access_token(user.id, tenant.id, membership.role)
     refresh_token = create_refresh_token(user.id, tenant.id, membership.role)
-    set_auth_cookies(response, access_token, refresh_token)
+    if browser_session == "1":
+        set_auth_cookies(response, access_token, refresh_token)
     return make_login_response(access_token, refresh_token, user, membership, tenant, browser_session=browser_session == "1")
 
 
@@ -886,7 +897,8 @@ async def ldap_login(body: LDAPLoginRequest, response: Response, browser_session
     await db.commit()
     token = create_access_token(user.id, tenant.id, membership.role)
     refresh_token = create_refresh_token(user.id, tenant.id, membership.role)
-    set_auth_cookies(response, token, refresh_token)
+    if browser_session == "1":
+        set_auth_cookies(response, token, refresh_token)
     return make_login_response(token, refresh_token, user, membership, tenant, browser_session=browser_session == "1")
 
 
@@ -964,7 +976,8 @@ async def oidc_callback(body: OIDCCallbackRequest, response: Response, browser_s
     await db.commit()
     token = create_access_token(user.id, tenant.id, membership.role)
     refresh_token = create_refresh_token(user.id, tenant.id, membership.role)
-    set_auth_cookies(response, token, refresh_token)
+    if browser_session == "1":
+        set_auth_cookies(response, token, refresh_token)
     return make_login_response(token, refresh_token, user, membership, tenant, browser_session=browser_session == "1")
 
 
