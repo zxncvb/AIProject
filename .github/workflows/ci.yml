@@ -37,6 +37,12 @@ jobs:
           POSTGRES_CONTROLLER_PASSWORD: ci-controller-validation-only
           GRAFANA_ADMIN_PASSWORD: ci-grafana-validation-only
       - run: python -c "from pathlib import Path; assert 'application/json; charset=utf-8' in Path('backend/app/main.py').read_text(encoding='utf-8')"
+      - name: Validate CI shell script syntax
+        shell: bash
+        run: |
+          for script in deploy/ci/*.sh; do
+            bash -n "$script"
+          done
 
   frontend:
     runs-on: ubuntu-latest

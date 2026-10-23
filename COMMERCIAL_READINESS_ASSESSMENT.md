@@ -587,3 +587,12 @@ README 中有三处表述高于当前实现，建议在售前材料和验收文�
 ## 2026-10-23 追加复核：公开结果撤销接入 CI
 
 - CI 集成冒烟已覆盖公开异步调用、轮询、管理员撤销令牌和撤销后 `410 Gone` 响应。
+
+---
+
+## 2026-10-23 追加复核：就绪探针与 CI 脚本校验
+
+- `/healthz` 与 `/readyz` 职责分离：前者仅验证进程存活，后者验证 PostgreSQL、当前 Alembic head `20261023_mcp_approval` 和 Redis。
+- 数据库迁移未完成、迁移版本落后或 Redis 不可用时，`/readyz` 明确返回 HTTP 503，不会让编排系统把未完成迁移的实例加入流量。
+- CI 新增所有 `deploy/ci/*.sh` 的 Bash 语法检查。
+- 本地验证：94 个后端测试通过，服务层覆盖率 41.78%，Python 编译、Compose 配置和 Kustomize 渲染通过；真实 Docker daemon、PostgreSQL/Redis 集成和 GitHub 远程检查仍需环境验收。

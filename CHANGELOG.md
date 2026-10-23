@@ -405,3 +405,9 @@
 ## 2026-10-23：公开结果撤销接入 CI 冒烟
 
 - `deploy/ci/smoke-test.sh` 现在在异步结果轮询成功后撤销 `result_token`，并验证公开查询返回 `410`。
+
+## 2026-10-23：健康检查与 CI 语法校验
+
+- `/healthz` 调整为纯存活探针，不因 PostgreSQL 或 Redis 短暂故障误报进程死亡。
+- `/readyz` 现在要求 PostgreSQL 可访问、Alembic 版本处于当前 head `20261023_mcp_approval` 且 Redis 可用；任一依赖不满足时返回 503，并避免向外暴露内部异常细节。
+- GitHub Actions 新增 `deploy/ci/*.sh` 的 `bash -n` 语法校验，避免 smoke、RLS、PITR 脚本在集成阶段才暴露语法错误。

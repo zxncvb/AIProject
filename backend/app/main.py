@@ -222,6 +222,10 @@ for _handler in logging.getLogger().handlers:
     _handler.setFormatter(JsonLogFormatter())
 logger = logging.getLogger("enterprise_ai_platform")
 
+# Keep readiness tied to the schema that the running application was built
+# against.  This must be updated together with every new Alembic head.
+EXPECTED_ALEMBIC_HEAD = "20261023_mcp_approval"
+
 PERMISSION_CATALOG = [
     {"key": "workspace.read", "name": "查看工作区"},
     {"key": "workflow.write", "name": "编辑工作流"},
@@ -717,20 +721,43 @@ async def security_middleware(request: Request, call_next):
 
 
 @app.get("/healthz")
-async def healthz(db: AsyncSession = Depends(get_db)):
-    await db.execute(select(1))
+async def healthz():
+    """Liveness probe: the process is alive even while dependencies recover."""
     return {"ok": True, "service": "enterprise-ai-platform", "time": utcnow().isoformat()}
 
 
 @app.get("/readyz")
 async def readyz(db: AsyncSession = Depends(get_db)):
-    await db.execute(select(1))
+    """Readiness probe: only succeed when schema and required cache are usable."""
+    try:
+        await db.execute(select(1))
+        versions = list((await db.execute(text("SELECT version_num FROM alembic_version"))).scalars().all())
+        if versions != [EXPECTED_ALEMBIC_HEAD]:
+            raise RuntimeError("database migrations are not at the application head")
+    except Exception as exc:
+        logger.warning("readiness_postgres_failed", extra={"error": type(exc).__name__})
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "postgres_not_ready", "message": "PostgreSQL schema is not ready"},
+        ) from exc
+
     redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
     try:
         await redis.ping()
+    except Exception as exc:
+        logger.warning("readiness_redis_failed", extra={"error": type(exc).__name__})
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "redis_not_ready", "message": "Redis is not ready"},
+        ) from exc
     finally:
         await redis.aclose()
-    return {"ok": True, "service": "enterprise-ai-platform", "dependencies": {"postgres": "ok", "redis": "ok"}, "time": utcnow().isoformat()}
+    return {
+        "ok": True,
+        "service": "enterprise-ai-platform",
+        "dependencies": {"postgres": "ok", "redis": "ok", "migrations": EXPECTED_ALEMBIC_HEAD},
+        "time": utcnow().isoformat(),
+    }
 
 
 @app.get("/metrics", response_class=PlainTextResponse)
