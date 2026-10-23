@@ -447,6 +447,126 @@ def validate_knowledge_asset(asset_type: str, content: dict[str, Any]) -> None:
         raise HTTPException(status_code=422, detail="datasource 知识资产需要字符串 type 和对象 config")
 
 
+async def provision_tenant_defaults(db: AsyncSession, tenant: Tenant, owner_id: str) -> dict[str, Any]:
+    """Create the minimum usable tenant topology, safely on retries.
+
+    Tenant creation is deliberately idempotent because bootstrap, retrying a
+    request after a network timeout, and a future provisioning worker can all
+    reach this path.  All rows are scoped by the tenant ID; no global defaults
+    are copied from another tenant.
+    """
+    membership = await db.scalar(select(Membership).where(Membership.user_id == owner_id, Membership.tenant_id == tenant.id))
+    if not membership:
+        db.add(Membership(user_id=owner_id, tenant_id=tenant.id, role="owner", is_active=True))
+    elif not membership.is_active:
+        membership.is_active = True
+        membership.role = "owner"
+
+    project = await db.scalar(select(Project).where(Project.tenant_id == tenant.id, Project.slug == "platform"))
+    if not project:
+        project = Project(tenant_id=tenant.id, name="Platform Core", slug="platform", description="企业 AI 中台基础项目")
+        db.add(project)
+        await db.flush()
+
+    organization = await db.scalar(select(Organization).where(
+        Organization.tenant_id == tenant.id,
+        Organization.parent_id.is_(None),
+        Organization.name == "默认组织",
+    ))
+    if not organization:
+        organization = Organization(tenant_id=tenant.id, name="默认组织", code="default")
+        db.add(organization)
+        await db.flush()
+
+    workspace = await db.scalar(select(Workspace).where(Workspace.tenant_id == tenant.id, Workspace.slug == "default"))
+    if not workspace:
+        workspace = Workspace(
+            tenant_id=tenant.id,
+            organization_id=organization.id,
+            owner_id=owner_id,
+            name="默认工作区",
+            slug="default",
+            workspace_type="team",
+            description="企业 AI 中台默认工作区",
+        )
+        db.add(workspace)
+        await db.flush()
+    if workspace.organization_id is None:
+        workspace.organization_id = organization.id
+    workspace_member = await db.scalar(select(WorkspaceMember).where(
+        WorkspaceMember.workspace_id == workspace.id,
+        WorkspaceMember.user_id == owner_id,
+    ))
+    if not workspace_member:
+        db.add(WorkspaceMember(tenant_id=tenant.id, workspace_id=workspace.id, user_id=owner_id, role="owner"))
+    elif workspace_member.role != "owner":
+        workspace_member.role = "owner"
+    if project.workspace_id is None:
+        project.workspace_id = workspace.id
+
+    for code, name, kind in [
+        ("api", "Open API", "api"),
+        ("mcp", "MCP 服务", "mcp"),
+        ("web", "Web 应用", "web"),
+        ("websdk", "WebSDK", "websdk"),
+        ("feishu", "飞书", "im"),
+        ("wecom", "企业微信", "im"),
+        ("wechat", "微信公众号", "im"),
+        ("a2a", "A2A 服务", "a2a"),
+    ]:
+        channel = await db.scalar(select(PublishChannel).where(PublishChannel.tenant_id == tenant.id, PublishChannel.code == code))
+        if not channel:
+            db.add(PublishChannel(
+                tenant_id=tenant.id,
+                name=name,
+                code=code,
+                channel_type=kind,
+                approval_required=kind in {"im", "a2a"},
+                created_by=owner_id,
+            ))
+
+    built_in_roles = {
+        "owner": [item["key"] for item in PERMISSION_CATALOG],
+        "admin": [item["key"] for item in PERMISSION_CATALOG if item["key"] != "member.admin"],
+        "operator": ["workspace.read", "workflow.run", "audit.read"],
+        "developer": ["workspace.read", "workflow.write", "workflow.run", "knowledge.write"],
+        "viewer": ["workspace.read", "audit.read"],
+    }
+    role_names = {"owner": "所有者", "admin": "管理员", "operator": "操作员", "developer": "开发者", "viewer": "查看者"}
+    for slug, permissions in built_in_roles.items():
+        role = await db.scalar(select(Role).where(Role.tenant_id == tenant.id, Role.slug == slug))
+        if not role:
+            db.add(Role(
+                tenant_id=tenant.id,
+                name=role_names[slug],
+                slug=slug,
+                permissions_json=permissions,
+                is_system=True,
+                created_by=owner_id,
+            ))
+
+    policy = await db.scalar(select(TenantPolicy).where(TenantPolicy.tenant_id == tenant.id))
+    if not policy:
+        settings = get_settings()
+        db.add(TenantPolicy(
+            tenant_id=tenant.id,
+            safety_json={
+                "mode": settings.safety_mode,
+                "max_input_chars": settings.safety_max_input_chars,
+                "block_prompt_injection": settings.safety_block_prompt_injection,
+            },
+            pricing_json={
+                "currency": settings.finops_currency,
+                "token_price_per_1k": settings.finops_token_price_per_1k,
+                "gpu_price_per_second": settings.finops_gpu_price_per_second,
+                "cpu_price_per_second": settings.finops_cpu_price_per_second,
+            },
+        ))
+
+    await db.flush()
+    return {"project_id": project.id, "organization_id": organization.id, "workspace_id": workspace.id}
+
+
 async def bootstrap() -> None:
     settings = get_settings()
     async with AdminSessionLocal() as db:
@@ -460,48 +580,7 @@ async def bootstrap() -> None:
             user = User(email=settings.bootstrap_admin_email, display_name="平台管理员", password_hash=hash_password(settings.bootstrap_admin_password))
             db.add(user)
             await db.flush()
-        membership = await db.scalar(select(Membership).where(Membership.user_id == user.id, Membership.tenant_id == tenant.id))
-        if not membership:
-            db.add(Membership(user_id=user.id, tenant_id=tenant.id, role="owner"))
-        project = await db.scalar(select(Project).where(Project.tenant_id == tenant.id, Project.slug == "platform"))
-        if not project:
-            project = Project(tenant_id=tenant.id, name="Platform Core", slug="platform", description="企业 AI 中台基础项目")
-            db.add(project)
-            await db.flush()
-        organization = await db.scalar(select(Organization).where(Organization.tenant_id == tenant.id, Organization.parent_id.is_(None), Organization.name == "默认组织"))
-        if not organization:
-            organization = Organization(tenant_id=tenant.id, name="默认组织", code="default")
-            db.add(organization)
-            await db.flush()
-        workspace = await db.scalar(select(Workspace).where(Workspace.tenant_id == tenant.id, Workspace.slug == "default"))
-        if not workspace:
-            workspace = Workspace(tenant_id=tenant.id, organization_id=organization.id, owner_id=user.id, name="默认工作区", slug="default", workspace_type="team", description="企业 AI 中台默认工作区")
-            db.add(workspace)
-            await db.flush()
-        workspace_member = await db.scalar(select(WorkspaceMember).where(WorkspaceMember.workspace_id == workspace.id, WorkspaceMember.user_id == user.id))
-        if not workspace_member:
-            db.add(WorkspaceMember(tenant_id=tenant.id, workspace_id=workspace.id, user_id=user.id, role="owner"))
-        if project.workspace_id is None:
-            project.workspace_id = workspace.id
-        for code, name, kind in [
-            ("api", "Open API", "api"), ("mcp", "MCP 服务", "mcp"), ("web", "Web 应用", "web"),
-            ("websdk", "WebSDK", "websdk"), ("feishu", "飞书", "im"), ("wecom", "企业微信", "im"),
-            ("wechat", "微信公众号", "im"), ("a2a", "A2A 服务", "a2a"),
-        ]:
-            channel = await db.scalar(select(PublishChannel).where(PublishChannel.tenant_id == tenant.id, PublishChannel.code == code))
-            if not channel:
-                db.add(PublishChannel(tenant_id=tenant.id, name=name, code=code, channel_type=kind, approval_required=kind in {"im", "a2a"}, created_by=user.id))
-        built_in_roles = {
-            "owner": [item["key"] for item in PERMISSION_CATALOG],
-            "admin": [item["key"] for item in PERMISSION_CATALOG if item["key"] != "member.admin"],
-            "operator": ["workspace.read", "workflow.run", "audit.read"],
-            "developer": ["workspace.read", "workflow.write", "workflow.run", "knowledge.write"],
-            "viewer": ["workspace.read", "audit.read"],
-        }
-        for slug, permissions in built_in_roles.items():
-            role = await db.scalar(select(Role).where(Role.tenant_id == tenant.id, Role.slug == slug))
-            if not role:
-                db.add(Role(tenant_id=tenant.id, name={"owner": "所有者", "admin": "管理员", "operator": "操作员", "developer": "开发者", "viewer": "查看者"}[slug], slug=slug, permissions_json=permissions, is_system=True, created_by=user.id))
+        await provision_tenant_defaults(db, tenant, user.id)
         await db.commit()
 
 
@@ -1515,10 +1594,10 @@ async def create_tenant(body: TenantCreate, ctx: Context, db: AsyncSession = Dep
     tenant = Tenant(name=body.name.strip(), slug=slug, is_active=True)
     db.add(tenant)
     await db.flush()
-    db.add(Membership(user_id=ctx.user_id, tenant_id=tenant.id, role="owner", is_active=True))
+    defaults = await provision_tenant_defaults(db, tenant, ctx.user_id)
     db.add(AuditEvent(tenant_id=tenant.id, actor_id=ctx.user_id, action="tenant.create", resource_type="tenant", resource_id=tenant.id, detail_json={"slug": slug}))
     await db.commit()
-    return {"id": tenant.id, "name": tenant.name, "slug": tenant.slug, "role": "owner"}
+    return {"id": tenant.id, "name": tenant.name, "slug": tenant.slug, "role": "owner", "defaults": defaults}
 
 
 @app.get("/api/members")

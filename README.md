@@ -133,6 +133,7 @@ npm run test:e2e --prefix frontend
 - 全代码沙箱：`/api/runtime/sandbox/runs` 生成无特权、只读根文件系统、禁网的 Kubernetes Job，由 `app.sandbox_controller` 提交到集群。
 - 异步评测：`/api/evaluations/jobs` 入队，由 worker 执行并通过查询接口读取结果。
 - 扩展治理：新插件和 MCP 服务默认为 `pending`，必须分别通过 `/api/plugins/{id}/approve` 或 `/api/mcp-servers/{id}/approve` 后，才允许测试和 Agent/工作流调用；拒绝 MCP 会自动停用。
+- 租户开通：`POST /api/tenants` 会为当前用户创建 owner membership，并幂等初始化默认项目、组织、工作区、发布渠道、系统角色和租户策略。
 - 告警适配：`/api/admin/alerts/test` 支持通用 Webhook、钉钉、飞书、企业微信；地址通过环境变量配置。
 - 密钥轮换：`/api/admin/security/rotate-secrets` 重新加密模型、插件、MCP、MFA 密钥。
 
