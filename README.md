@@ -169,6 +169,8 @@ kubectl apply -k deploy/k8s
 
 `deploy/k8s/secrets.example.yaml` 仅为字段示例，不能直接作为生产密钥使用。
 
+生产 Secret 必须同时提供非默认的 `APP_SECRET_KEY`、`BOOTSTRAP_ADMIN_PASSWORD`、受限的 `TRUSTED_HOSTS`，以及 BuildKit、Node.js、Python、Go、Java 沙箱镜像的完整 `@sha256:<64 位 digest>`；启动守卫会在 API 和 Worker 启动前拒绝缺失或使用 tag 的配置。
+
 GitHub Actions 默认只构建并推送镜像，不会在缺少集群凭据时误触生产发布。启用自动发布前，需要在仓库中配置 Base64 编码的 `KUBE_CONFIG_DATA` Secret，并把仓库变量 `ENABLE_KUBERNETES_DEPLOY` 设置为 `true`；未设置时部署、评测和回滚任务会安全跳过。
 
 ## 工作流图示例

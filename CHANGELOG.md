@@ -241,3 +241,7 @@
 
 - Agent 对话运行时明确支持 `chat` / `chatflow`；`workflow` 与 `a2a` 不再作为未实现的对话类型展示，分别通过工作流和发布通道入口执行。
 - 历史或导入的未支持类型不会静默落入聊天循环，配置发布和对话调用返回 `agent_type_not_supported`，避免产品标签与实际行为不一致。
+
+### 生产部署配置补强
+
+- Kubernetes Secret 示例补齐生产启动守卫所需的环境、bootstrap 密码、可信域名及 BuildKit/Node.js/Python/Go/Java 镜像 digest 字段，并增加测试防止交付清单遗漏必填项。

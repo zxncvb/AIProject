@@ -1,8 +1,27 @@
+from pathlib import Path
+
 import pytest
 from fastapi import HTTPException
 
 from app.config import Settings, validate_runtime_settings
 from app.main import bind_database_parameters, finops_costs, validate_extension_manifest, validate_knowledge_asset
+
+
+def test_kubernetes_secret_example_documents_production_guard_inputs():
+    example = (Path(__file__).parents[2] / "deploy" / "k8s" / "secrets.example.yaml").read_text(encoding="utf-8")
+    for field in (
+        "APP_ENV",
+        "APP_SECRET_KEY",
+        "BOOTSTRAP_ADMIN_PASSWORD",
+        "TRUSTED_HOSTS",
+        "APPLICATION_BUILDKIT_IMAGE",
+        "SANDBOX_NODE_IMAGE",
+        "SANDBOX_PYTHON_IMAGE",
+        "SANDBOX_GO_IMAGE",
+        "SANDBOX_JAVA_IMAGE",
+    ):
+        assert f"{field}:" in example
+    assert "@sha256:replace-with-64-hex-digest" in example
 
 
 def test_production_defaults_fail_fast_and_safe_settings_pass():
