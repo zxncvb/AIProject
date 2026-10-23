@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.main import apply_database_column_policy, public_application_runtime, public_runtime_manifest
+from app.main import apply_database_column_policy, public_application_runtime, public_runtime_manifest, validate_public_input
 from app.services.llm import rank_providers
 from app.services.sandbox import build_job_manifest
 from app.services.workflow import enqueue_job
@@ -76,6 +76,48 @@ def test_public_runtime_manifest_strips_sensitive_ui_metadata():
     assert "private" not in rendered
     assert result["ui"]["nested"]["label"] == "保留"
     assert "password" in result["input_schema"]["properties"]
+
+
+def test_public_input_validation_handles_nested_schema_constraints():
+    schema = {
+        "type": "object",
+        "required": ["profile", "tags"],
+        "additionalProperties": False,
+        "properties": {
+            "profile": {
+                "type": "object",
+                "required": ["age", "role"],
+                "additionalProperties": False,
+                "properties": {
+                    "age": {"type": "integer", "minimum": 18, "maximum": 120},
+                    "role": {"type": "string", "enum": ["admin", "viewer"]},
+                },
+            },
+            "tags": {"type": "array", "minItems": 1, "items": {"type": "string", "maxLength": 12}},
+        },
+    }
+    validate_public_input(schema, {"profile": {"age": 30, "role": "viewer"}, "tags": ["support"]})
+    with pytest.raises(Exception) as exc:
+        validate_public_input(schema, {"profile": {"age": 17, "role": "owner"}, "tags": ["x"], "debug": True})
+    assert exc.value.status_code == 422
+    assert "$.profile.age" in exc.value.detail["fields"]
+    assert "$.profile.role" in exc.value.detail["fields"]
+    assert "$.debug" in exc.value.detail["fields"]
+
+
+def test_public_runtime_manifest_does_not_expose_sensitive_input_defaults():
+    result = public_runtime_manifest({
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "default": "secret-default", "examples": ["secret-example"]},
+                "question": {"type": "string", "default": "hello"},
+            },
+        },
+    })
+    assert "secret-default" not in str(result)
+    assert "secret-example" not in str(result)
+    assert result["input_schema"]["properties"]["question"]["default"] == "hello"
 
 
 @pytest.mark.asyncio

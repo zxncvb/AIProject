@@ -211,3 +211,8 @@
 - 公开 API 已补充最小 Python SDK（`sdk/python`），统一使用 `/api/v1/public` 版本化路径；CI 新增后端服务层覆盖率报告与 20% 门禁，并上传 `coverage.xml` 供发布验收留档。
 
 本机已通过 Python 语法检查、Alembic head 检查、前端生产构建和 `git diff --check`。当前环境没有 Docker 引擎，且本机 Python 3.14 的 Pydantic 依赖版本不匹配，因此 Compose 集成测试、pytest 和真实数据库迁移需要在 CI 的 Python 3.12/Docker 环境中复验。
+
+### 公开应用契约校验补强
+
+- 公开应用输入校验支持嵌套对象/数组、枚举、长度/数量限制、数值边界和 `additionalProperties`，错误返回统一 `invalid_input` 字段路径。
+- 公开应用 manifest 返回前会清除敏感输入字段的默认值、常量和示例，避免匿名应用页面泄露测试密钥。

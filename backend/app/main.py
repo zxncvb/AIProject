@@ -2008,7 +2008,80 @@ def resolve_public_value(value: Any, input_data: dict[str, Any]) -> Any:
     return re.sub(r"\{\{\s*input\.([^}]+?)\s*\}\}", lambda item: str(resolve_public_value(item.group(0), input_data)), value)
 
 
+def _validate_public_input_schema(schema: dict[str, Any], input_data: dict[str, Any]) -> None:
+    """Validate the JSON-schema subset accepted by public applications."""
+    if not schema:
+        return
+    if not isinstance(input_data, dict):
+        raise HTTPException(status_code=422, detail={"code": "invalid_input", "message": "public input must be a JSON object"})
+
+    def matches(expected: str, value: Any) -> bool:
+        return {
+            "string": isinstance(value, str),
+            "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+            "integer": isinstance(value, int) and not isinstance(value, bool),
+            "boolean": isinstance(value, bool),
+            "object": isinstance(value, dict),
+            "array": isinstance(value, list),
+            "null": value is None,
+        }.get(expected, True)
+
+    def validate_node(node: Any, value: Any, path: str) -> list[str]:
+        if not isinstance(node, dict):
+            return []
+        errors: list[str] = []
+        expected = node.get("type")
+        expected_types = expected if isinstance(expected, list) else [expected]
+        expected_types = [item for item in expected_types if isinstance(item, str)]
+        if expected_types and not any(matches(item, value) for item in expected_types):
+            return [path]
+        if isinstance(node.get("enum"), list) and value not in node["enum"]:
+            errors.append(path)
+        if isinstance(value, str):
+            for keyword, check in (("minLength", lambda bound: len(value) >= int(bound)), ("maxLength", lambda bound: len(value) <= int(bound))):
+                if keyword in node:
+                    try:
+                        if not check(node[keyword]):
+                            errors.append(path)
+                    except (TypeError, ValueError):
+                        errors.append(path)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            for keyword, check in (("minimum", lambda bound: value >= float(bound)), ("maximum", lambda bound: value <= float(bound))):
+                if keyword in node:
+                    try:
+                        if not check(node[keyword]):
+                            errors.append(path)
+                    except (TypeError, ValueError):
+                        errors.append(path)
+        if isinstance(value, list):
+            for keyword, check in (("minItems", lambda bound: len(value) >= int(bound)), ("maxItems", lambda bound: len(value) <= int(bound))):
+                if keyword in node:
+                    try:
+                        if not check(node[keyword]):
+                            errors.append(path)
+                    except (TypeError, ValueError):
+                        errors.append(path)
+            if isinstance(node.get("items"), dict):
+                for index, item in enumerate(value):
+                    errors.extend(validate_node(node["items"], item, f"{path}[{index}]"))
+        if isinstance(value, dict):
+            properties = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+            required = node.get("required") if isinstance(node.get("required"), list) else []
+            errors.extend(f"{path}.{key}" for key in required if isinstance(key, str) and key not in value)
+            for key, child_schema in properties.items():
+                if key in value:
+                    errors.extend(validate_node(child_schema, value[key], f"{path}.{key}"))
+            if node.get("additionalProperties") is False:
+                errors.extend(f"{path}.{key}" for key in value if key not in properties)
+        return errors
+
+    errors = sorted(set(validate_node(schema, input_data, "$")))
+    if errors:
+        raise HTTPException(status_code=422, detail={"code": "invalid_input", "message": "public input violates the application schema", "fields": errors})
+
+
 def validate_public_input(schema: dict[str, Any], input_data: dict[str, Any]) -> None:
+    return _validate_public_input_schema(schema, input_data)
     if not schema:
         return
     if not isinstance(input_data, dict):
@@ -2072,7 +2145,13 @@ def public_runtime_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(action, dict):
             continue
         safe_actions.append({key: value for key, value in action.items() if key not in {"app_key", "secret", "token", "api_key", "headers"}})
-    return {"ui": sanitize_public_manifest_value(ui), "input_schema": manifest.get("input_schema") or {}, "actions": [sanitize_public_manifest_value(item) for item in safe_actions], "version": manifest.get("runtime_version", 1)}
+    input_schema = sanitize_public_manifest_value(manifest.get("input_schema") or {})
+    if isinstance(input_schema, dict) and isinstance(input_schema.get("properties"), dict):
+        for name, definition in input_schema["properties"].items():
+            if str(name).lower() in PUBLIC_MANIFEST_SECRET_KEYS and isinstance(definition, dict):
+                for key in ("default", "const", "example", "examples"):
+                    definition.pop(key, None)
+    return {"ui": sanitize_public_manifest_value(ui), "input_schema": input_schema, "actions": [sanitize_public_manifest_value(item) for item in safe_actions], "version": manifest.get("runtime_version", 1)}
 
 
 async def record_public_application_access(db: AsyncSession, tenant_id: str, application_id: str, version: int, request: Request, status_code: int, started: float) -> None:
