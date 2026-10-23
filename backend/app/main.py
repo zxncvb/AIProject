@@ -4210,7 +4210,7 @@ async def run_skill(skill_id: str, body: dict[str, Any], ctx: OperatorContext, d
 @app.get("/api/plugins")
 async def list_plugins(ctx: Context, db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(Plugin).where(Plugin.tenant_id == ctx.tenant_id).order_by(Plugin.name))).scalars().all()
-    return [{"id": row.id, "name": row.name, "kind": row.kind, "endpoint": row.endpoint, "manifest": row.manifest_json, "enabled": row.enabled, "approval_status": row.approval_status, "approved_at": row.approved_at} for row in rows]
+    return [{"id": row.id, "name": row.name, "kind": row.kind, "endpoint": row.endpoint, "manifest": row.manifest_json, "enabled": row.enabled, "approval_status": row.approval_status, "approved_by": row.approved_by, "approved_at": row.approved_at} for row in rows]
 
 
 @app.post("/api/plugins")
@@ -4286,7 +4286,7 @@ async def test_plugin(plugin_id: str, ctx: AdminContext, db: AsyncSession = Depe
 @app.get("/api/mcp-servers")
 async def list_mcp_servers(ctx: Context, db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(MCPServer).where(MCPServer.tenant_id == ctx.tenant_id).order_by(MCPServer.name))).scalars().all()
-    return [{"id": row.id, "name": row.name, "endpoint": row.endpoint, "transport": row.transport, "manifest": row.manifest_json, "enabled": row.enabled, "approval_status": row.approval_status, "approved_at": row.approved_at, "has_secret": bool(row.secret_encrypted)} for row in rows]
+    return [{"id": row.id, "name": row.name, "endpoint": row.endpoint, "transport": row.transport, "manifest": row.manifest_json, "enabled": row.enabled, "approval_status": row.approval_status, "approved_by": row.approved_by, "approved_at": row.approved_at, "has_secret": bool(row.secret_encrypted)} for row in rows]
 
 
 @app.post("/api/mcp-servers")

@@ -1,7 +1,9 @@
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.models import MCPServer
 from app.services import agent_runtime
 
 
@@ -51,6 +53,60 @@ def test_mcp_resource_model_exposes_approval_contract():
     assert hasattr(agent_runtime.MCPServer, "approval_status")
     assert hasattr(agent_runtime.MCPServer, "approved_by")
     assert hasattr(agent_runtime.MCPServer, "approved_at")
+
+
+@pytest.mark.asyncio
+async def test_agent_tools_only_load_approved_enabled_mcp_servers():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(MCPServer.__table__.create)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        async with sessions() as db:
+            db.add_all([
+                MCPServer(
+                    id="approved-1",
+                    tenant_id="tenant-1",
+                    name="approved",
+                    endpoint="http://localhost:1",
+                    transport="streamable_http",
+                    manifest_json={"tools": ["lookup"]},
+                    approval_status="approved",
+                    enabled=True,
+                    created_by="user-1",
+                ),
+                MCPServer(
+                    id="pending-1",
+                    tenant_id="tenant-1",
+                    name="pending",
+                    endpoint="http://localhost:2",
+                    transport="streamable_http",
+                    manifest_json={"tools": ["must_not_load"]},
+                    approval_status="pending",
+                    enabled=True,
+                    created_by="user-1",
+                ),
+                MCPServer(
+                    id="disabled-1",
+                    tenant_id="tenant-1",
+                    name="disabled",
+                    endpoint="http://localhost:3",
+                    transport="streamable_http",
+                    manifest_json={"tools": ["must_not_load"]},
+                    approval_status="approved",
+                    enabled=False,
+                    created_by="user-1",
+                ),
+            ])
+            await db.commit()
+            tools = await agent_runtime.load_agent_tools(
+                db,
+                "tenant-1",
+                SimpleNamespace(capabilities_json={"mcp_servers": ["approved-1", "pending-1", "disabled-1"]}),
+            )
+        assert [(tool.kind, tool.original_name) for tool in tools.values()] == [("mcp", "lookup")]
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
