@@ -624,3 +624,10 @@ README 中有三处表述高于当前实现，建议在售前材料和验收文�
 
 - 修复 API lifespan 只校验普通运行时数据库角色、未校验控制器角色的启动缺口。
 - API、Worker、Application Controller 和 Sandbox Controller 现在统一执行控制器角色守卫；生产环境会拒绝缺失、超级用户或未显式 `BYPASSRLS` 的控制器连接。
+---
+
+## 2026-10-23 追加复核：API 管理员连接显式守卫
+
+- API 启动时会执行租户/管理员引导，因此生产环境现在必须显式配置 `DATABASE_ADMIN_URL`；不会再把运行时连接 URL 静默当作引导连接。
+- Worker 和 Kubernetes 控制器仍只使用 `CONTROLLER_DATABASE_URL`，不要求或读取管理员连接；对应测试覆盖 API 启动守卫的缺失配置失败路径。
+- 本批验证结果：后端 `101 passed`，服务层覆盖率 `42.31%`；API 专用管理员连接启动守卫、Python 编译、Compose 配置和 Kustomize 渲染均通过。真实 PostgreSQL 角色权限和 Docker 集成仍需目标环境验收。

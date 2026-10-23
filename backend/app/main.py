@@ -195,7 +195,7 @@ from .services.evaluation import judge_answer
 from .services.public_callback import validate_public_callback_url
 from .services.sandbox import build_job_manifest
 from .services.storage import content_type_for, delete_object, get_bytes, object_key, presign_get, put_bytes
-from .services.startup_guard import validate_controller_startup, validate_database_runtime_role
+from .services.startup_guard import validate_api_startup, validate_controller_startup, validate_database_runtime_role
 from .services.totp import provisioning_uri, random_base32, verify as verify_totp
 from .services.workflow import enqueue_evaluation, enqueue_index, enqueue_job, enqueue_run, enqueue_sandbox, next_schedule_time, ordered_nodes
 
@@ -626,7 +626,7 @@ async def refresh_operational_metrics() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    await validate_controller_startup()
+    await validate_api_startup()
     setup_telemetry()
     await bootstrap()
     metrics_task = asyncio.create_task(refresh_operational_metrics())

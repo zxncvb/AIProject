@@ -428,3 +428,7 @@
 
 - API lifespan 现在调用 `validate_controller_startup()`，生产启动时同时校验运行时角色非 superuser，以及 `CONTROLLER_DATABASE_URL` 角色为非 superuser 且显式具备 `BYPASSRLS`。
 - 新增回归断言，防止 API 进程退回只校验普通运行时数据库角色。
+## 2026-10-23：API 管理员连接显式启动守卫
+
+- API 生产启动现在要求显式配置 `DATABASE_ADMIN_URL`，避免租户/管理员引导静默回退到运行时数据库账号；Worker 和控制器继续只使用 `CONTROLLER_DATABASE_URL`。
+- 新增生产 API 缺少管理员连接时的启动失败回归测试。

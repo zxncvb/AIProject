@@ -36,7 +36,7 @@ def test_all_production_process_entrypoints_use_shared_startup_guard():
         source = (root / filename).read_text(encoding="utf-8")
         assert "validate_startup" in source or "validate_controller_startup" in source
     main_source = (root / "main.py").read_text(encoding="utf-8")
-    assert "await validate_controller_startup()" in main_source
+    assert "await validate_api_startup()" in main_source
 
 
 def test_backup_delivery_contract_is_wired_to_kubernetes_secret():
@@ -230,3 +230,18 @@ async def test_production_controller_role_requires_non_superuser_bypassrls(monke
     monkeypatch.setattr(startup_guard, "controller_engine", SuperuserEngine())
     with pytest.raises(RuntimeError, match="controller database role must not be a PostgreSQL superuser"):
         await startup_guard.validate_database_controller_role()
+
+
+@pytest.mark.asyncio
+async def test_production_api_requires_explicit_admin_database_url(monkeypatch):
+    monkeypatch.setattr(startup_guard, "validate_controller_startup", lambda: _completed())
+    monkeypatch.setattr(startup_guard, "get_settings", lambda: Settings(
+        app_env="production",
+        database_admin_url="",
+    ))
+    with pytest.raises(RuntimeError, match="DATABASE_ADMIN_URL"):
+        await startup_guard.validate_api_startup()
+
+
+async def _completed():
+    return None

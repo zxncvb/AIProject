@@ -51,6 +51,14 @@ async def validate_controller_startup() -> None:
     await validate_database_controller_role()
 
 
+async def validate_api_startup() -> None:
+    """Require the API's explicit bootstrap/migration owner connection."""
+    await validate_controller_startup()
+    settings = get_settings()
+    if settings.app_env.strip().lower() in {"production", "prod"} and not settings.database_admin_url.strip():
+        raise RuntimeError("DATABASE_ADMIN_URL is required for the production API bootstrap connection")
+
+
 async def validate_startup() -> None:
     """Run static and database-backed guards before a process serves work."""
     settings = get_settings()
