@@ -5,6 +5,7 @@ import pytest
 from app import main
 from app.main import apply_database_column_policy, public_application_runtime, public_runtime_manifest, validate_public_input
 from app.services.llm import rank_providers
+from app.services import workflow
 from app.services.sandbox import build_job_manifest
 from app.services.workflow import enqueue_job
 
@@ -182,3 +183,27 @@ async def test_agent_stream_failure_persists_partial_usage_and_audit(monkeypatch
     assert next(item for item in db.added if getattr(item, "event_type", "") == "message_failed").tokens == 11
     assert next(item for item in db.added if item.__class__.__name__ == "ComputeUsage").tokens == 11
     assert audits[0][0] == "agent.chat.stream.failed"
+
+
+@pytest.mark.asyncio
+async def test_public_workflow_callback_is_sent_after_terminal_state(monkeypatch):
+    sent = []
+
+    async def fake_deliver(url, payload):
+        sent.append((url, payload))
+        return {"delivered": True, "attempts": 1, "status_code": 200}
+
+    monkeypatch.setattr(workflow, "deliver_public_callback", fake_deliver)
+    row = SimpleNamespace(
+        id="run-1",
+        tenant_id="tenant-1",
+        status="succeeded",
+        output_json={"value": "ok"},
+        error="",
+        finished_at="2026-10-23T00:00:00Z",
+        state_json={"public_callback_url": "https://hooks.example.com/result"},
+    )
+    await workflow.notify_public_callback(row)
+    assert sent[0][0] == "https://hooks.example.com/result"
+    assert sent[0][1]["run_id"] == "run-1"
+    assert sent[0][1]["status"] == "succeeded"
