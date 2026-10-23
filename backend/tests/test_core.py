@@ -1,7 +1,7 @@
 from app.services.crypto import chunk_text
 from app.services.evaluation import parse_judge_result
 from app.services.identity import claim_values, mapped_role, parse_role_mapping
-from app.services.knowledge import rerank_candidates
+from app.services.knowledge import normalize_metadata_filter, rerank_candidates
 from app.services.rate_limit import allow_local, clear_local
 from app.services.storage import object_key
 from app.services.workflow import fair_order_messages, ordered_nodes, resolve
@@ -53,6 +53,14 @@ def test_rag_reranker_prefers_term_coverage_and_keeps_explanation():
     )
     assert rows[0]["chunk_id"] == "a"
     assert rows[0]["rerank"]["term_coverage"] > 0
+
+
+def test_rag_metadata_filter_is_allowlisted_and_bounded():
+    assert normalize_metadata_filter({"source": "upload", "status": ["ready", "indexing"]}) == {"source": "upload", "status": ["ready", "indexing"]}
+    with pytest.raises(ValueError, match="unsupported metadata"):
+        normalize_metadata_filter({"tenant_id": "other-tenant"})
+    with pytest.raises(ValueError, match="1-20"):
+        normalize_metadata_filter({"source": list(range(21))})
 
 
 def test_worker_fair_order_round_robins_tenants_and_respects_priority():

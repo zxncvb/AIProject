@@ -176,7 +176,7 @@ from .schemas import (
 from .security import create_access_token, create_refresh_token, decode_access_token, decode_refresh_token, decrypt_secret, encrypt_secret, hash_password, secret_backend_status, verify_password
 from .services.auth_sessions import clear_login_failures, consume_password_reset, create_password_reset, is_login_locked, is_token_revoked, record_login_failure, revoke_token, revoke_user_sessions
 from .services.crypto import checksum, chunk_text
-from .services.knowledge import search_chunks
+from .services.knowledge import normalize_metadata_filter, search_chunks
 from .services.identity import BUILTIN_ROLES, mapped_role, parse_role_mapping
 from .services.ldap_auth import LDAPError, authenticate as ldap_authenticate
 from .services.llm import call_chat, call_routed_chat
@@ -3880,14 +3880,20 @@ async def delete_document(document_id: str, ctx: EditorContext, db: AsyncSession
 
 
 @app.get("/api/knowledge-bases/{kb_id}/search")
-async def query_kb(kb_id: str, q: str, ctx: Context, mode: str = "hybrid", db: AsyncSession = Depends(get_db)):
+async def query_kb(kb_id: str, q: str, ctx: Context, mode: str = "hybrid", metadata: str | None = None, db: AsyncSession = Depends(get_db)):
     kb = await db.scalar(select(KnowledgeBase).where(KnowledgeBase.id == kb_id, KnowledgeBase.tenant_id == ctx.tenant_id))
     if not kb:
         raise HTTPException(status_code=404, detail="知识库不存在")
     await require_kb_access(kb_id, ctx, db)
     if mode not in {"hybrid", "keyword"}:
         raise HTTPException(status_code=422, detail="检索模式必须是 hybrid 或 keyword")
-    return {"query": q, "mode": mode, "results": await search_chunks(db, ctx.tenant_id, kb.id, q, mode=mode)}
+    metadata_filter: dict[str, Any] = {}
+    if metadata:
+        try:
+            metadata_filter = normalize_metadata_filter(json.loads(metadata))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "invalid_metadata_filter", "message": str(exc)}) from exc
+    return {"query": q, "mode": mode, "metadata": metadata_filter, "results": await search_chunks(db, ctx.tenant_id, kb.id, q, mode=mode, metadata_filter=metadata_filter)}
 
 
 @app.get("/api/knowledge-bases/{kb_id}/assets")

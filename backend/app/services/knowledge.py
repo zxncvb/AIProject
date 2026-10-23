@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
-from ..models import DocumentChunk
+from ..models import Document, DocumentChunk
 from ..models import ModelProvider
 from .vector import search_vectors
 
@@ -42,11 +42,57 @@ def rerank_candidates(candidates: list[dict[str, Any]], query: str, limit: int) 
     return sorted(candidates, key=lambda item: (item["score"], item.get("chunk_id", "")), reverse=True)[:limit]
 
 
-async def search_chunks(db: AsyncSession, tenant_id: str, kb_id: str, query: str, limit: int = 5, mode: str = "hybrid") -> list[dict[str, Any]]:
+SEARCH_METADATA_FIELDS = {
+    "source": Document.source,
+    "mime_type": Document.mime_type,
+    "status": Document.status,
+    "security_status": Document.security_status,
+    "document_id": Document.id,
+    "title": Document.title,
+}
+
+
+def normalize_metadata_filter(metadata: dict[str, Any] | None) -> dict[str, str | list[str]]:
+    """Keep search filters finite and restricted to document metadata fields."""
+    if not metadata:
+        return {}
+    if not isinstance(metadata, dict):
+        raise ValueError("metadata filter must be a JSON object")
+    result: dict[str, str | list[str]] = {}
+    for key, value in metadata.items():
+        if key not in SEARCH_METADATA_FIELDS:
+            raise ValueError(f"unsupported metadata filter: {key}")
+        if isinstance(value, list):
+            values = [str(item).strip() for item in value if str(item).strip()]
+            if not values or len(values) > 20:
+                raise ValueError(f"metadata filter {key} must contain 1-20 values")
+            result[key] = values
+        elif isinstance(value, (str, int, float, bool)):
+            text = str(value).strip()
+            if not text or len(text) > 300:
+                raise ValueError(f"metadata filter {key} is too long or empty")
+            result[key] = text
+        else:
+            raise ValueError(f"metadata filter {key} must be scalar or an array")
+    return result
+
+
+async def search_chunks(
+    db: AsyncSession,
+    tenant_id: str,
+    kb_id: str,
+    query: str,
+    limit: int = 5,
+    mode: str = "hybrid",
+    metadata_filter: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     limit = max(1, min(int(limit), 100))
-    result = await db.execute(
-        select(DocumentChunk).where(DocumentChunk.tenant_id == tenant_id, DocumentChunk.kb_id == kb_id).limit(max(limit * 20, min(get_settings().knowledge_candidate_limit, 50000)))
-    )
+    normalized_filter = normalize_metadata_filter(metadata_filter)
+    statement = select(DocumentChunk).join(Document, Document.id == DocumentChunk.document_id).where(DocumentChunk.tenant_id == tenant_id, DocumentChunk.kb_id == kb_id, Document.tenant_id == tenant_id)
+    for key, value in normalized_filter.items():
+        column = SEARCH_METADATA_FIELDS[key]
+        statement = statement.where(column.in_(value) if isinstance(value, list) else column == value)
+    result = await db.execute(statement.limit(max(limit * 20, min(get_settings().knowledge_candidate_limit, 50000))))
     terms = _terms(query)
     scored: list[tuple[float, DocumentChunk]] = []
     for row in result.scalars():
