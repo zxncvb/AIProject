@@ -64,6 +64,7 @@
 - 灾备演练已支持指定生产备份镜像，Kubernetes CronJob 已接入 `BACKUP_S3_URI` 异地归档配置；实际 PITR 恢复仍需在客户 PostgreSQL/WAL 环境演练。
 - Agent 流式调用的异常路径已补齐部分用量、失败事件和审计落库，避免模型/工具在输出中断时只返回错误而丢失计费证据。
 - 公开异步应用新增 manifest 级 `callback_url`：仅允许配置的出站主机，工作流/沙箱终态发送 HMAC 签名回调并有限重试；签名结果轮询仍保留作为事实来源。
+- 工作流执行已接入现有 `run_span`，OpenTelemetry 可用时生成执行 span，耗时指标按租户记录；未配置 OTel 时仍输出带 trace/tenant 的调试信息。
 
 ---
 

@@ -14,6 +14,8 @@ def test_kubernetes_secret_example_documents_production_guard_inputs():
         "APP_SECRET_KEY",
         "BOOTSTRAP_ADMIN_PASSWORD",
         "TRUSTED_HOSTS",
+        "ALLOWED_HTTP_HOSTS",
+        "PUBLICATION_SIGNING_SECRET",
         "APPLICATION_BUILDKIT_IMAGE",
         "SANDBOX_NODE_IMAGE",
         "SANDBOX_PYTHON_IMAGE",
