@@ -1,5 +1,6 @@
 """Runtime for tenant-scoped Agent tools and multi-turn execution."""
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from .observability import tool_calls
 
 
 MAX_TOOL_RESULT_CHARS = 12000
+MAX_TOOL_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -179,6 +181,10 @@ def _check_allowed_http_endpoint(endpoint: str) -> None:
         raise RuntimeError("工具地址不在租户允许的主机列表中")
 
 
+def _retryable_tool_status(status_code: int) -> bool:
+    return status_code == 429 or 500 <= status_code <= 599
+
+
 async def execute_bound_tool(tool: BoundTool, arguments: dict[str, Any], *, tenant_id: str) -> Any:
     if tool.kind == "skill":
         return {"skill": tool.resource_name, "instructions": tool.instructions, "input": arguments}
@@ -192,16 +198,28 @@ async def execute_bound_tool(tool: BoundTool, arguments: dict[str, Any], *, tena
             headers.pop("X-AI-Plugin-Secret", None)
     timeout = httpx.Timeout(30.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        if tool.kind == "plugin":
-            response = await client.post(tool.endpoint, json={"tool": tool.original_name, "arguments": arguments}, headers=headers)
-        else:
-            if tool.transport == "stdio":
-                raise RuntimeError("MCP stdio 服务需要由受控 sidecar 执行")
-            response = await client.post(
-                tool.endpoint,
-                json={"jsonrpc": "2.0", "id": tool.name, "method": "tools/call", "params": {"name": tool.original_name, "arguments": arguments}},
-                headers=headers,
-            )
+        if tool.kind != "plugin" and tool.transport == "stdio":
+            raise RuntimeError("MCP stdio 服务需要由受控 sidecar 执行")
+        payload = (
+            {"tool": tool.original_name, "arguments": arguments}
+            if tool.kind == "plugin"
+            else {"jsonrpc": "2.0", "id": tool.name, "method": "tools/call", "params": {"name": tool.original_name, "arguments": arguments}}
+        )
+        response = None
+        for attempt in range(MAX_TOOL_ATTEMPTS):
+            try:
+                response = await client.post(tool.endpoint, json=payload, headers=headers)
+                if _retryable_tool_status(response.status_code) and attempt + 1 < MAX_TOOL_ATTEMPTS:
+                    await asyncio.sleep(0.2 * (attempt + 1))
+                    continue
+                response.raise_for_status()
+                break
+            except (httpx.TimeoutException, httpx.NetworkError):
+                if attempt + 1 >= MAX_TOOL_ATTEMPTS:
+                    raise
+                await asyncio.sleep(0.2 * (attempt + 1))
+        if response is None:
+            raise RuntimeError("tool request did not produce a response")
         response.raise_for_status()
         try:
             payload = response.json()

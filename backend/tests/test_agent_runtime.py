@@ -26,6 +26,13 @@ def test_tool_calls_are_normalized_and_missing_ids_are_stable():
     assert calls == [{"id": "tool_call_0", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]
 
 
+def test_tool_retry_policy_only_retries_transient_statuses():
+    assert agent_runtime._retryable_tool_status(429)
+    assert agent_runtime._retryable_tool_status(503)
+    assert not agent_runtime._retryable_tool_status(400)
+    assert not agent_runtime._retryable_tool_status(404)
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_executes_tool_then_sends_tool_result_back(monkeypatch):
     bound = agent_runtime.BoundTool("plugin_p1_lookup", "lookup", "plugin", "p1", "Orders")
