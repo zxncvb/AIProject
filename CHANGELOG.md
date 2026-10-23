@@ -281,3 +281,7 @@
 ### Python SDK 异步闭环
 
 - Python SDK 对租户/应用/结果令牌路径做 URL 编码，新增 `wait_for_result` 和 `invoke_and_wait`，并补充同步结果不轮询、异步结果等待终态的测试。
+
+### Agent 流式工具回归覆盖
+
+- 新增流式 Agent 工具调用回归：覆盖分片 tool-call delta 重组、工具结果事件、最终文本和工具审计 trace 的连续输出。
