@@ -392,3 +392,7 @@
 
 - 外部工作流 Webhook 触发入口改用 `get_controller_db`，与公开应用运行和结果查询保持一致，不再使用迁移 owner/admin 连接。
 - 安全契约测试覆盖 Webhook、公开运行时、公开调用和结果查询四类外部入口。
+## 2026-10-23：Agent 流式 API 端到端契约回归
+
+- 新增 FastAPI API 层 SSE 回归测试，覆盖 API Key scope、权限依赖、`text/event-stream` 响应，以及 `token`、`tool_call`、`tool_result`、`done` 事件。
+- 测试同时验证流式完成后的 AgentEvent 和 ComputeUsage 持久化，避免只验证运行时生成器而遗漏路由层闭环。
