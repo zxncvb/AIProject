@@ -224,3 +224,7 @@
 ### 沙箱供应链守卫补强
 
 - 生产启动要求 BuildKit 与 Node.js/Python/Go/Java 沙箱镜像使用合法的 sha256 immutable digest；开发/测试环境仍保留默认 tag。
+
+### 公开 API 集成测试补强
+
+- 新增 ASGI 层公开应用契约测试，覆盖 manifest、调用、输入校验、限流依赖和安全响应头。
