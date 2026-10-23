@@ -1,4 +1,6 @@
 import asyncio
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -59,13 +61,14 @@ def rank_providers(providers: list[ModelProvider], health: dict[str, ModelHealth
 
 async def call_routed_chat(
     db: AsyncSession,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     *,
     tenant_id: str,
     preferred_provider_id: str | None = None,
     model: str | None = None,
     temperature: float = 0.2,
     max_tokens: int | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     providers = (await db.execute(select(ModelProvider).where(ModelProvider.tenant_id == tenant_id, ModelProvider.enabled.is_(True)))).scalars().all()
     if preferred_provider_id:
@@ -90,7 +93,16 @@ async def call_routed_chat(
         if await _breaker_count(tenant_id, provider.id) >= 3:
             continue
         try:
-            result = await call_chat(db, provider, messages, tenant_id=tenant_id, model=model if provider.id == preferred_provider_id else None, temperature=temperature, max_tokens=max_tokens)
+            result = await call_chat(
+                db,
+                provider,
+                messages,
+                tenant_id=tenant_id,
+                model=model if provider.id == preferred_provider_id else None,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+            )
             await _breaker_record(tenant_id, provider.id, True)
             return {**result, "provider_id": provider.id, "model": model if provider.id == preferred_provider_id and model else provider.default_model}
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
@@ -106,12 +118,13 @@ async def call_routed_chat(
 async def call_chat(
     db: AsyncSession,
     provider: ModelProvider,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     *,
     tenant_id: str,
     model: str | None = None,
     temperature: float = 0.2,
     max_tokens: int | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not provider.enabled:
         raise RuntimeError("模型提供商已禁用")
@@ -128,6 +141,9 @@ async def call_chat(
     }
     if max_tokens:
         payload["max_tokens"] = max_tokens
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
     try:
         async with httpx.AsyncClient(timeout=get_settings().model_timeout_seconds) as client:
             for attempt in range(3):
@@ -146,7 +162,149 @@ async def call_chat(
         llm_calls.labels(tenant_id, provider.name, "success").inc()
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
-        return {"text": message.get("content", ""), "raw": data, "usage": data.get("usage", {})}
+        tool_calls = message.get("tool_calls") or []
+        if not tool_calls and message.get("function_call"):
+            tool_calls = [{"id": "legacy_function_call", "type": "function", "function": message["function_call"]}]
+        return {
+            "text": message.get("content") or "",
+            "raw": data,
+            "usage": data.get("usage", {}),
+            "tool_calls": tool_calls,
+            "provider_id": provider.id,
+            "model": model or provider.default_model,
+        }
     except Exception:
         llm_calls.labels(tenant_id, provider.name, "error").inc()
         raise
+
+
+async def stream_chat(
+    provider: ModelProvider,
+    messages: list[dict[str, Any]],
+    *,
+    tenant_id: str,
+    model: str | None = None,
+    temperature: float = 0.2,
+    max_tokens: int | None = None,
+    tools: list[dict[str, Any]] | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Stream an OpenAI-compatible chat response as normalized events."""
+    if not provider.enabled:
+        raise RuntimeError("模型提供商已禁用")
+    endpoint = provider.base_url.rstrip("/")
+    endpoint = endpoint if endpoint.endswith("/chat/completions") else f"{endpoint}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    api_key = decrypt_secret(provider.api_key_encrypted)
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload: dict[str, Any] = {
+        "model": model or provider.default_model,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+
+    try:
+        async with httpx.AsyncClient(timeout=get_settings().model_timeout_seconds) as client:
+            async with client.stream("POST", endpoint, json=payload, headers=headers) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if raw == "[DONE]":
+                        yield {"type": "done"}
+                        return
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    usage = data.get("usage") or {}
+                    if usage:
+                        yield {"type": "usage", "usage": usage}
+                    choice = (data.get("choices") or [{}])[0]
+                    delta = choice.get("delta") or {}
+                    if delta.get("content"):
+                        yield {"type": "text", "text": delta["content"]}
+                    if delta.get("tool_calls"):
+                        yield {"type": "tool_call_delta", "tool_calls": delta["tool_calls"]}
+                    elif delta.get("function_call"):
+                        yield {"type": "tool_call_delta", "tool_calls": [{"index": 0, "function": delta["function_call"]}]}
+                    if choice.get("finish_reason"):
+                        yield {"type": "finish", "reason": choice["finish_reason"]}
+        yield {"type": "done"}
+        llm_calls.labels(tenant_id, provider.name, "success").inc()
+    except Exception:
+        llm_calls.labels(tenant_id, provider.name, "error").inc()
+        raise
+
+
+async def stream_routed_chat(
+    db: AsyncSession,
+    messages: list[dict[str, Any]],
+    *,
+    tenant_id: str,
+    preferred_provider_id: str | None = None,
+    model: str | None = None,
+    temperature: float = 0.2,
+    max_tokens: int | None = None,
+    tools: list[dict[str, Any]] | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Route a streaming request using the same tenant/provider policy as chat."""
+    providers = (await db.execute(select(ModelProvider).where(ModelProvider.tenant_id == tenant_id, ModelProvider.enabled.is_(True)))).scalars().all()
+    if preferred_provider_id:
+        preferred = next((item for item in providers if item.id == preferred_provider_id), None)
+        if not preferred:
+            raise RuntimeError("指定的模型提供商不可用")
+        fallback_ids = (preferred.config_json or {}).get("fallback_provider_ids") or []
+        allowed = {preferred_provider_id, *(fallback_ids if isinstance(fallback_ids, list) else [])}
+        providers = [item for item in providers if item.id in allowed]
+    if not providers:
+        raise RuntimeError("没有可用的模型提供商")
+    latest = {
+        provider.id: await db.scalar(
+            select(ModelHealthCheck).where(
+                ModelHealthCheck.provider_id == provider.id,
+                ModelHealthCheck.tenant_id == tenant_id,
+            ).order_by(desc(ModelHealthCheck.created_at))
+        )
+        for provider in providers
+    }
+    ordered = rank_providers(providers, latest)
+    if preferred_provider_id:
+        ordered.sort(key=lambda item: item.id != preferred_provider_id)
+    last_error: Exception | None = None
+    for provider in ordered:
+        if await _breaker_count(tenant_id, provider.id) >= 3:
+            continue
+        emitted = False
+        try:
+            async for event in stream_chat(
+                provider,
+                messages,
+                tenant_id=tenant_id,
+                model=model if provider.id == preferred_provider_id else None,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+            ):
+                emitted = True
+                yield {**event, "provider_id": provider.id, "model": model if provider.id == preferred_provider_id and model else provider.default_model}
+            await _breaker_record(tenant_id, provider.id, True)
+            return
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            if emitted:
+                raise
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code not in RETRYABLE_STATUS:
+                raise
+            await _breaker_record(tenant_id, provider.id, False)
+            last_error = exc
+    if last_error is None:
+        raise RuntimeError("模型提供商正在熔断，请稍后重试")
+    raise last_error

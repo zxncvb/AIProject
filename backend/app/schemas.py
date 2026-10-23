@@ -18,8 +18,26 @@ class LoginRequest(BaseModel):
     mfa_code: str | None = Field(default=None, min_length=6, max_length=8)
 
 
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str | None = Field(default=None, min_length=20)
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str | None = Field(default=None, min_length=20)
+
+
 class PasswordChangeRequest(BaseModel):
     current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=12, max_length=200)
+
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    tenant_slug: str | None = None
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(min_length=32, max_length=256)
     new_password: str = Field(min_length=12, max_length=200)
 
 
@@ -51,6 +69,7 @@ class ScimUserPatch(BaseModel):
 
 class LoginResponse(BaseModel):
     access_token: str
+    refresh_token: str | None = None
     token_type: str = "bearer"
     user: dict[str, Any]
     tenant: dict[str, Any]
@@ -80,6 +99,14 @@ class MemberCreate(BaseModel):
     _validate_display_name = field_validator("display_name")(reject_corrupted_label)
 
 
+class MemberInviteRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    display_name: str = Field(min_length=1, max_length=120)
+    role: str = Field(default="viewer", pattern=r"^(owner|admin|developer|editor|operator|viewer)$")
+
+    _validate_display_name = field_validator("display_name")(reject_corrupted_label)
+
+
 class MemberRoleUpdate(BaseModel):
     role: str = Field(pattern=r"^(owner|admin|developer|editor|operator|viewer)$")
     custom_role_id: str | None = None
@@ -91,6 +118,13 @@ class ProjectCreate(BaseModel):
     slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,78}[a-z0-9]$", max_length=80)
     description: str = ""
     workspace_id: str | None = None
+
+
+class TenantCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,78}[a-z0-9]$", max_length=80)
+
+    _validate_name = field_validator("name")(reject_corrupted_label)
 
 
 class ProviderCreate(BaseModel):
@@ -126,7 +160,14 @@ class AgentCreate(BaseModel):
 class AgentChatRequest(BaseModel):
     message: str = Field(min_length=1)
     conversation: list[dict[str, str]] = Field(default_factory=list)
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=36)
     cost_center: str | None = Field(default=None, max_length=120)
+
+
+class AgentMemoryCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+    memory_key: str = Field(default="", max_length=120)
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
 
 
 class WorkflowCreate(BaseModel):
@@ -175,7 +216,10 @@ class RollbackRequest(BaseModel):
 
 
 class ScheduleCreate(BaseModel):
-    interval_seconds: int = Field(ge=10, le=31_536_000)
+    interval_seconds: int | None = Field(default=None, ge=10, le=31_536_000)
+    cron_expression: str | None = Field(default=None, min_length=5, max_length=120)
+    timezone: str = Field(default="UTC", min_length=1, max_length=80)
+    misfire_policy: str = Field(default="skip", pattern=r"^(skip|run_once)$")
     environment: str = Field(default="production", pattern=r"^(dev|staging|production)$")
     input: dict[str, Any] = Field(default_factory=dict)
     active: bool = True
@@ -183,6 +227,9 @@ class ScheduleCreate(BaseModel):
 
 class ScheduleUpdate(BaseModel):
     interval_seconds: int | None = Field(default=None, ge=10, le=31_536_000)
+    cron_expression: str | None = Field(default=None, min_length=5, max_length=120)
+    timezone: str | None = Field(default=None, min_length=1, max_length=80)
+    misfire_policy: str | None = Field(default=None, pattern=r"^(skip|run_once)$")
     active: bool | None = None
     input: dict[str, Any] | None = None
 
@@ -206,6 +253,9 @@ class ApplicationUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=160)
     description: str | None = None
     runtime: dict[str, Any] | None = None
+    custom_domain: str | None = Field(default=None, max_length=253)
+    tls_secret_name: str | None = Field(default=None, max_length=253)
+    public_rate_limit_per_minute: int | None = Field(default=None, ge=1, le=10000)
 
 
 class ApplicationRollback(BaseModel):
@@ -323,6 +373,10 @@ class EvaluationCase(BaseModel):
 class EvaluationRequest(BaseModel):
     agent_id: str
     cases: list[EvaluationCase] = Field(min_length=1, max_length=20)
+    dataset_version: str = Field(default="v1", min_length=1, max_length=80)
+    judge_enabled: bool = False
+    judge_provider_id: str | None = None
+    regression_threshold: float = Field(default=0, ge=0, le=1)
 
 
 class EvaluationJobCreate(EvaluationRequest):

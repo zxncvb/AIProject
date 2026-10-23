@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas import MemberCreate
-from app.services.application_runtime import build_application_manifests, build_buildkit_manifest, validate_build_source
+from app.services.application_runtime import build_application_manifests, build_buildkit_manifest, validate_application_domain, validate_build_source
 from app.services.content_security import inspect_dlp, inspect_upload, validate_file_signature
 from app.services.publication import channel_payload, signed_headers
 
@@ -32,6 +32,16 @@ def test_full_code_build_and_runtime_manifests_are_hardened():
     assert runtime_pod["automountServiceAccountToken"] is False
     assert container["securityContext"]["readOnlyRootFilesystem"] is True
     assert any(item["name"] == "API_KEY" and "valueFrom" in item for item in container["env"])
+
+
+def test_application_custom_domain_is_bound_to_ingress_tls_secret():
+    domain, secret = validate_application_domain("Portal.Example.COM", "portal-tls")
+    assert (domain, secret) == ("portal.example.com", "portal-tls")
+    manifests = build_application_manifests("deploy-123", "customer-service", "registry.example/app:v1", 1, 8080, "/healthz", {}, {}, host=domain, tls_secret_name=secret)
+    assert manifests["ingress"]["spec"]["rules"][0]["host"] == "portal.example.com"
+    assert manifests["ingress"]["spec"]["tls"][0]["secretName"] == "portal-tls"
+    with pytest.raises(ValueError, match="完整的 DNS"):
+        validate_application_domain("not a hostname", "portal-tls")
 
 
 def test_publication_payload_and_signature_are_channel_compatible():

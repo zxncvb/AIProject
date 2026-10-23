@@ -9,11 +9,26 @@ from ..config import get_settings
 
 
 DNS_LABEL = re.compile(r"[^a-z0-9-]+")
+HOSTNAME = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
+SECRET_NAME = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 
 
 def resource_name(prefix: str, identifier: str) -> str:
     value = DNS_LABEL.sub("-", f"{prefix}-{identifier}".lower()).strip("-")
     return value[:63].rstrip("-")
+
+
+def validate_application_domain(domain: str, tls_secret_name: str = "") -> tuple[str, str]:
+    """Validate a customer hostname and its Kubernetes TLS secret name."""
+    normalized = domain.strip().lower().rstrip(".")
+    if normalized and not HOSTNAME.fullmatch(normalized):
+        raise ValueError("custom_domain 必须是完整的 DNS 域名")
+    secret = tls_secret_name.strip()
+    if normalized and not secret:
+        raise ValueError("配置 custom_domain 时必须同时提供 tls_secret_name")
+    if secret and not SECRET_NAME.fullmatch(secret):
+        raise ValueError("tls_secret_name 不是有效的 Kubernetes Secret 名称")
+    return normalized, secret
 
 
 def validate_build_source(source: dict[str, Any]) -> dict[str, str]:
@@ -91,6 +106,8 @@ def build_application_manifests(
     health_path: str,
     env: dict[str, str],
     secret_refs: dict[str, str],
+    host: str | None = None,
+    tls_secret_name: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     name = resource_name("ai-app", app_slug)
@@ -126,10 +143,11 @@ def build_application_manifests(
         "spec": {"selector": {"app.kubernetes.io/name": name}, "ports": [{"name": "http", "port": 80, "targetPort": "http"}]},
     }
     manifests: dict[str, Any] = {"deployment": deployment, "service": service}
-    if settings.application_base_domain:
-        host = f"{app_slug}.{settings.application_base_domain}".lower()
+    ingress_host = (host or (f"{app_slug}.{settings.application_base_domain}" if settings.application_base_domain else "")).lower()
+    if ingress_host:
+        ingress_host, ingress_tls_secret = validate_application_domain(ingress_host, tls_secret_name or "application-wildcard-tls")
         manifests["ingress"] = {
             "apiVersion": "networking.k8s.io/v1", "kind": "Ingress", "metadata": {"name": name, "namespace": settings.application_runtime_namespace, "annotations": {"nginx.ingress.kubernetes.io/proxy-body-size": "25m"}},
-            "spec": {"tls": [{"hosts": [host], "secretName": "application-wildcard-tls"}], "rules": [{"host": host, "http": {"paths": [{"path": "/", "pathType": "Prefix", "backend": {"service": {"name": name, "port": {"number": 80}}}}]}}]},
+            "spec": {"tls": [{"hosts": [ingress_host], "secretName": ingress_tls_secret}], "rules": [{"host": ingress_host, "http": {"paths": [{"path": "/", "pathType": "Prefix", "backend": {"service": {"name": name, "port": {"number": 80}}}}]}}]},
         }
     return manifests

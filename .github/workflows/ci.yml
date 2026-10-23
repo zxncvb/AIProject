@@ -15,7 +15,20 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install -r backend/requirements.txt
       - run: python -m compileall -q backend/app
-      - run: PYTHONPATH=backend pytest -q backend/tests
+      - name: 单元测试与覆盖率门禁
+        run: >-
+          PYTHONPATH=backend pytest -q backend/tests
+          --cov=backend/app/services
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
+          --cov-fail-under=20
+      - name: 上传覆盖率报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: coverage.xml
+          if-no-files-found: ignore
       - name: 校验 Docker Compose 配置
         run: docker compose config --quiet
         env:

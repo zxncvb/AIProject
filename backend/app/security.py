@@ -23,20 +23,36 @@ def verify_password(value: str, encoded: str) -> bool:
     return password_hash.verify(value, encoded)
 
 
-def create_access_token(user_id: str, tenant_id: str, role: str) -> str:
+def create_access_token(user_id: str, tenant_id: str, role: str, *, token_type: str = "access", expires_delta: timedelta | None = None) -> str:
     now = datetime.now(timezone.utc)
     claims: dict[str, Any] = {
         "sub": user_id,
         "tenant_id": tenant_id,
         "role": role,
+        "type": token_type,
+        "jti": base64.urlsafe_b64encode(hashlib.sha256(f"{user_id}:{tenant_id}:{now.timestamp()}".encode()).digest()[:18]).decode().rstrip("="),
         "iat": now,
-        "exp": now + timedelta(minutes=settings.jwt_expire_minutes),
+        "exp": now + (expires_delta or timedelta(minutes=settings.jwt_expire_minutes)),
     }
     return jwt.encode(claims, settings.app_secret_key, algorithm="HS256")
 
 
+def create_refresh_token(user_id: str, tenant_id: str, role: str) -> str:
+    return create_access_token(user_id, tenant_id, role, token_type="refresh", expires_delta=timedelta(days=settings.jwt_refresh_expire_days))
+
+
 def decode_access_token(token: str) -> dict[str, Any]:
-    return jwt.decode(token, settings.app_secret_key, algorithms=["HS256"])
+    claims = jwt.decode(token, settings.app_secret_key, algorithms=["HS256"])
+    if claims.get("type", "access") != "access":
+        raise jwt.InvalidTokenError("not an access token")
+    return claims
+
+
+def decode_refresh_token(token: str) -> dict[str, Any]:
+    claims = jwt.decode(token, settings.app_secret_key, algorithms=["HS256"])
+    if claims.get("type") != "refresh":
+        raise jwt.InvalidTokenError("not a refresh token")
+    return claims
 
 
 def _fernet() -> Fernet:

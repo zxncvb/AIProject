@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import hashlib
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .db import AdminSessionLocal, get_db, set_tenant_context
 from .models import ApiKey, Membership, Role, Tenant, User
 from .security import decode_access_token
+from .services.auth_sessions import is_token_revoked
 
 
 bearer = HTTPBearer(auto_error=False)
@@ -50,24 +51,27 @@ class RequestContext:
 
 
 async def get_context(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     db: Annotated[AsyncSession, Depends(get_db)],
     x_tenant_id: Annotated[str | None, Header()] = None,
     x_api_key: Annotated[str | None, Header()] = None,
 ) -> RequestContext:
-    token = x_api_key or (credentials.credentials if credentials else None)
+    token = x_api_key or (credentials.credentials if credentials else None) or request.cookies.get("eai_access_token")
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="需要登录")
     api_key_row = None
     try:
         claims = decode_access_token(token)
+        if await is_token_revoked(claims):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录会话已失效")
         user_id = str(claims["sub"])
         token_tenant = str(claims["tenant_id"])
         tenant_id = x_tenant_id or token_tenant
         await set_tenant_context(db, tenant_id)
         result = await db.execute(
             select(User, Tenant, Membership)
-            .join(Membership, Membership.user_id == User.id)
+            .join(Membership, (Membership.user_id == User.id) & (Membership.is_active.is_(True)))
             .join(Tenant, Tenant.id == Membership.tenant_id)
             .where(User.id == user_id, Tenant.id == tenant_id, User.is_active.is_(True), Tenant.is_active.is_(True))
         )
@@ -86,7 +90,7 @@ async def get_context(
         result = await db.execute(
             select(User, Tenant, Membership, ApiKey)
             .join(ApiKey, ApiKey.user_id == User.id)
-            .join(Membership, (Membership.user_id == User.id) & (Membership.tenant_id == ApiKey.tenant_id))
+            .join(Membership, (Membership.user_id == User.id) & (Membership.tenant_id == ApiKey.tenant_id) & (Membership.is_active.is_(True)))
             .join(Tenant, Tenant.id == ApiKey.tenant_id)
             .where(ApiKey.key_hash == key_hash, ApiKey.enabled.is_(True), User.is_active.is_(True), Tenant.is_active.is_(True))
         )
@@ -108,6 +112,8 @@ async def get_context(
             custom_permissions = tuple(role.permissions_json or [])
     if api_key_row:
         custom_permissions = (*custom_permissions, *(f"api:{scope}" for scope in (api_key_row[3].scopes_json or [])))
+    request.state.tenant_id = tenant_id
+    request.state.user_id = row[0].id
     return RequestContext(user=row[0], tenant=row[1], membership=row[2], custom_permissions=custom_permissions)
 
 

@@ -12,12 +12,28 @@ curl --fail --silent "$base_url/readyz" | jq -e '.ok == true' >/dev/null
 login_payload="$(jq -n --arg email "$BOOTSTRAP_ADMIN_EMAIL" --arg password "$BOOTSTRAP_ADMIN_PASSWORD" '{email:$email,password:$password}')"
 token="$(curl --fail --silent --show-error -H 'Content-Type: application/json' -d "$login_payload" "$base_url/api/auth/login" | jq -er '.access_token')"
 auth=(-H "Authorization: Bearer $token")
+cookie_jar="$(mktemp)"
+cookie_login="$(curl --fail --silent --show-error -c "$cookie_jar" -H 'Content-Type: application/json' -H 'X-Browser-Session: 1' -d "$login_payload" "$base_url/api/auth/login")"
+echo "$cookie_login" | jq -e '.user.email != null and .access_token == "" and .refresh_token == null' >/dev/null
+grep -q '#HttpOnly_.*eai_access_token' "$cookie_jar"
+grep -q '#HttpOnly_.*eai_refresh_token' "$cookie_jar"
+curl --fail --silent --show-error -b "$cookie_jar" "$base_url/api/me" | jq -e '.user.email != null' >/dev/null
+curl --fail --silent --show-error -b "$cookie_jar" -c "$cookie_jar" -H 'Content-Type: application/json' -H 'X-Browser-Session: 1' -d '{}' "$base_url/api/auth/refresh" | jq -e '.user.email != null and .access_token == "" and .refresh_token == null' >/dev/null
+curl --fail --silent --show-error -b "$cookie_jar" -c "$cookie_jar" -X POST "$base_url/api/auth/logout" | jq -e '.revoked == true' >/dev/null
 curl --fail --silent "${auth[@]}" "$base_url/api/me" | jq -e '.user.email != null' >/dev/null
+curl --fail --silent --show-error "${auth[@]}" -H 'Content-Type: application/json' -d "$(jq -n --arg email "$BOOTSTRAP_ADMIN_EMAIL" '{email:$email}')" "$base_url/api/auth/password-reset/request" | jq -e '.accepted == true' >/dev/null
+invite_email="ci-invite-$(date +%s)@example.local"
+invite_json="$(curl --fail --silent --show-error "${auth[@]}" -H 'Content-Type: application/json' -d "$(jq -n --arg email "$invite_email" '{email:$email,display_name:"CI Invite",role:"viewer"}')" "$base_url/api/members/invite")"
+echo "$invite_json" | jq -e '.invited == true' >/dev/null
+invite_token="$(echo "$invite_json" | jq -er '.debug_token')"
+new_password="CI_invited_password_123!"
+curl --fail --silent --show-error -H 'Content-Type: application/json' -d "$(jq -n --arg token "$invite_token" --arg password "$new_password" '{token:$token,new_password:$password}')" "$base_url/api/auth/password-reset/confirm" | jq -e '.reset == true' >/dev/null
+curl --fail --silent --show-error -H 'Content-Type: application/json' -d "$(jq -n --arg email "$invite_email" --arg password "$new_password" '{email:$email,password:$password}')" "$base_url/api/auth/login" | jq -e '.access_token != null' >/dev/null
 project_id="$(curl --fail --silent "${auth[@]}" "$base_url/api/projects" | jq -er '.[0].id')"
 kb_name="CI 知识库 $(date +%s)"
 kb_id="$(curl --fail --silent --show-error "${auth[@]}" -H 'Content-Type: application/json' -d "$(jq -n --arg project_id "$project_id" --arg name "$kb_name" '{project_id:$project_id,name:$name}')" "$base_url/api/knowledge-bases" | jq -er '.id')"
 sample_file="$(mktemp)"
-trap 'rm -f -- "$sample_file"' EXIT
+trap 'rm -f -- "$sample_file" "$cookie_jar"' EXIT
 printf '企业知识库 CI 测试文档\n' > "$sample_file"
 curl --fail --silent --show-error "${auth[@]}" -F "file=@$sample_file;filename=ci-document.txt" "$base_url/api/knowledge-bases/$kb_id/documents" | jq -e '.security_status == "clean"' >/dev/null
 curl --fail --silent "${auth[@]}" "$base_url/api/admin/jobs/summary" | jq -e '.dead >= 0' >/dev/null

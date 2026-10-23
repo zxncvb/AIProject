@@ -21,7 +21,8 @@ BEGIN
     'database_connections', 'marketplace_items', 'favorites', 'publish_channels',
     'publish_bindings', 'approval_requests', 'intervention_rules',
     'application_builds', 'application_deployments', 'publish_deliveries',
-    'approval_policies', 'approval_votes'
+    'approval_policies', 'approval_votes', 'scim_groups', 'scim_group_members',
+    'vendor_billing_records', 'agent_conversations', 'agent_memories', 'application_access_logs'
   ] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', table_name);
     EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', table_name);

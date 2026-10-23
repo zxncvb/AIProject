@@ -180,6 +180,40 @@ services:
       - platform-artifacts:/app/data
     restart: unless-stopped
 
+  application-controller:
+    profiles: ["kubernetes"]
+    build: ./backend
+    command: ["python", "-m", "app.application_controller"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://platform_runtime:${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD in .env or the shell}@postgres:5432/platform
+      DATABASE_ADMIN_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}@postgres:5432/platform
+      REDIS_URL: redis://redis:6379/0
+      APPLICATION_RUNTIME_NAMESPACE: enterprise-ai-apps
+    depends_on:
+      db-security:
+        condition: service_completed_successfully
+    volumes:
+      - platform-artifacts:/app/data
+    restart: unless-stopped
+
+  sandbox-controller:
+    profiles: ["kubernetes"]
+    build: ./backend
+    command: ["python", "-m", "app.sandbox_controller"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://platform_runtime:${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD in .env or the shell}@postgres:5432/platform
+      DATABASE_ADMIN_URL: postgresql+asyncpg://platform:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env or the shell}@postgres:5432/platform
+      REDIS_URL: redis://redis:6379/0
+      SANDBOX_NAMESPACE: enterprise-ai-apps
+    depends_on:
+      db-security:
+        condition: service_completed_successfully
+    volumes:
+      - platform-artifacts:/app/data
+    restart: unless-stopped
+
   frontend:
     build: ./frontend
     depends_on:

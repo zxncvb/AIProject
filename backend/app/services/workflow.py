@@ -7,6 +7,7 @@ import socket
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from redis.asyncio import Redis
@@ -15,9 +16,10 @@ from sqlalchemy import func, or_, select
 
 from ..config import get_settings
 from ..db import AdminSessionLocal
-from ..models import Agent, ApprovalRequest, ComputeUsage, EvaluationJob, GpuLease, ModelProvider, Plugin, Project, PublishDelivery, SandboxRun, Skill, TenantPolicy, Workflow, WorkflowRun, WorkflowSchedule, WorkflowVersion
+from ..models import Agent, ApprovalRequest, ComputeUsage, Document, EvaluationJob, GpuLease, ModelProvider, Plugin, Project, PublishDelivery, SandboxRun, Skill, TenantPolicy, Workflow, WorkflowRun, WorkflowSchedule, WorkflowVersion
 from .knowledge import search_chunks
 from .llm import call_chat, call_routed_chat
+from .evaluation import judge_answer
 from .observability import new_trace_id, run_failures, runs_total, tool_calls
 from .safety import inspect_text
 from .sandbox import build_job_manifest
@@ -43,6 +45,88 @@ async def is_run_cancelled(run_id: str) -> bool:
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _cron_field(value: str, minimum: int, maximum: int) -> set[int]:
+    selected: set[int] = set()
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError("cron 字段不能为空")
+        base, _, step_text = part.partition("/")
+        try:
+            step = int(step_text) if step_text else 1
+        except ValueError as exc:
+            raise ValueError("cron 步长无效") from exc
+        if step <= 0:
+            raise ValueError("cron 步长必须大于 0")
+        if base == "*":
+            start, end = minimum, maximum
+        elif "-" in base:
+            pieces = base.split("-", 1)
+            try:
+                start, end = int(pieces[0]), int(pieces[1])
+            except ValueError as exc:
+                raise ValueError("cron 范围无效") from exc
+        else:
+            try:
+                start = end = int(base)
+            except ValueError as exc:
+                raise ValueError("cron 值无效") from exc
+        if start < minimum or end > maximum or start > end:
+            raise ValueError(f"cron 值必须在 {minimum}-{maximum} 范围内")
+        selected.update(range(start, end + 1, step))
+    return selected
+
+
+def next_cron_occurrence(expression: str, timezone_name: str, after: datetime) -> datetime:
+    """Return the next UTC occurrence for a standard five-field cron expression."""
+    fields = expression.split()
+    if len(fields) != 5:
+        raise ValueError("cron 表达式必须包含 5 个字段：分 时 日 月 周")
+    try:
+        tz = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"不支持的时区: {timezone_name}") from exc
+    minutes = _cron_field(fields[0], 0, 59)
+    hours = _cron_field(fields[1], 0, 23)
+    days = _cron_field(fields[2], 1, 31)
+    months = _cron_field(fields[3], 1, 12)
+    weekdays = _cron_field(fields[4], 0, 6)
+    local = after.astimezone(tz).replace(second=0, microsecond=0, tzinfo=None) + timedelta(minutes=1)
+    day_restricted = fields[2] != "*"
+    weekday_restricted = fields[4] != "*"
+    for _ in range(366 * 24 * 60):
+        weekday = (local.weekday() + 1) % 7
+        month_matches = local.month in months
+        day_matches = local.day in days
+        weekday_matches = weekday in weekdays
+        if not month_matches:
+            calendar_matches = False
+        elif day_restricted and weekday_restricted:
+            calendar_matches = day_matches or weekday_matches
+        elif day_restricted:
+            calendar_matches = day_matches
+        elif weekday_restricted:
+            calendar_matches = weekday_matches
+        else:
+            calendar_matches = True
+        if local.minute in minutes and local.hour in hours and calendar_matches:
+            candidate = local.replace(tzinfo=tz)
+            utc_candidate = candidate.astimezone(timezone.utc)
+            # Skip nonexistent local times during a DST spring-forward gap.
+            if utc_candidate.astimezone(tz).replace(tzinfo=None) == local:
+                return utc_candidate
+        local += timedelta(minutes=1)
+    raise ValueError("cron 表达式在一年内没有可执行时间")
+
+
+def next_schedule_time(cron_expression: str, timezone_name: str, interval_seconds: int | None, base: datetime) -> datetime:
+    if cron_expression.strip():
+        return next_cron_occurrence(cron_expression.strip(), timezone_name or "UTC", base)
+    if not interval_seconds:
+        raise ValueError("调度必须配置 interval_seconds 或 cron_expression")
+    return base + timedelta(seconds=max(10, interval_seconds))
 
 
 def resolve(value: Any, context: dict[str, Any]) -> Any:
@@ -88,13 +172,30 @@ def ordered_nodes(graph: dict[str, Any]) -> list[dict[str, Any]]:
     return [nodes[key] for key in ordered]
 
 
-async def enqueue_job(kind: str, resource_id: str, redis: Redis | None = None) -> str:
+async def _job_tenant_id(kind: str, resource_id: str) -> str:
+    model_by_kind = {
+        "workflow": WorkflowRun,
+        "knowledge_index": Document,
+        "evaluation": EvaluationJob,
+        "sandbox": SandboxRun,
+        "publication_delivery": PublishDelivery,
+    }
+    model = model_by_kind.get(kind)
+    if not model:
+        return ""
+    async with AdminSessionLocal() as db:
+        return str(await db.scalar(select(model.tenant_id).where(model.id == resource_id)) or "")
+
+
+async def enqueue_job(kind: str, resource_id: str, redis: Redis | None = None, *, tenant_id: str | None = None, priority: int = 5) -> str:
     if kind not in JOB_KINDS:
         raise ValueError(f"unsupported job kind: {kind}")
     owned = redis is None
     redis = redis or Redis.from_url(get_settings().redis_url, decode_responses=True)
     try:
-        return await redis.xadd(get_settings().job_stream, {"kind": kind, "resource_id": resource_id, "queued_at": now().isoformat()}, maxlen=100000, approximate=True)
+        tenant_id = tenant_id or await _job_tenant_id(kind, resource_id)
+        fields = {"kind": kind, "resource_id": resource_id, "tenant_id": tenant_id or "unknown", "priority": str(max(0, min(int(priority), 9))), "queued_at": now().isoformat()}
+        return await redis.xadd(get_settings().job_stream, fields, maxlen=100000, approximate=True)
     finally:
         if owned:
             await redis.aclose()
@@ -227,6 +328,10 @@ async def execute_evaluation(job_id: str) -> None:
             safety_policy = (policy.safety_json if policy else {}) or {}
             results: list[dict[str, Any]] = []
             total_tokens = 0
+            judge_tokens = 0
+            request = job.request_json or {}
+            judge_enabled = bool(request.get("judge_enabled"))
+            judge_provider_id = str(request.get("judge_provider_id") or "") or None
             for case in (job.request_json or {}).get("cases", []):
                 message = str(case.get("message") or "")
                 safety = inspect_text(message, safety_policy)
@@ -239,11 +344,21 @@ async def execute_evaluation(job_id: str) -> None:
                 total_tokens += int(usage.get("total_tokens", 0))
                 expected = [str(value) for value in case.get("expected_contains", [])]
                 missing = [value for value in expected if value.lower() not in answer.lower()]
-                results.append({"message": message, "answer": answer, "passed": not missing, "score": 1 if not missing else 0, "missing": missing, "usage": usage})
+                item = {"message": message, "answer": answer, "passed": not missing, "score": 1 if not missing else 0, "missing": missing, "usage": usage}
+                if judge_enabled:
+                    judge = await judge_answer(db, tenant_id=job.tenant_id, answer=answer, expected_contains=expected, provider_id=judge_provider_id)
+                    item["judge"] = judge
+                    item["passed"] = bool(item["passed"] and judge["passed"])
+                    item["score"] = round((float(item["score"]) + float(judge["score"])) / 2, 4)
+                    judge_tokens += int((judge.get("usage") or {}).get("total_tokens", 0))
+                results.append(item)
             passed = sum(1 for item in results if item["passed"])
-            job.results_json = {"agent_id": agent.id, "total": len(results), "passed": passed, "score": round(passed / len(results), 4) if results else 0, "results": results}
-            job.status, job.finished_at = "succeeded", now()
-            db.add(ComputeUsage(tenant_id=job.tenant_id, tokens=total_tokens))
+            score = round(passed / len(results), 4) if results else 0
+            threshold = max(0.0, min(1.0, float(request.get("regression_threshold") or 0)))
+            gate_passed = not threshold or score >= threshold
+            job.results_json = {"agent_id": agent.id, "dataset_version": request.get("dataset_version", "v1"), "total": len(results), "passed": passed, "score": score, "regression_threshold": threshold, "regression_gate": "passed" if gate_passed else "failed", "judge_enabled": judge_enabled, "results": results}
+            job.status, job.finished_at = ("succeeded" if gate_passed else "regression_failed"), now()
+            db.add(ComputeUsage(tenant_id=job.tenant_id, tokens=total_tokens + judge_tokens))
             await db.commit()
         except Exception as exc:
             job.status, job.error, job.finished_at = "failed", str(exc), now()
@@ -291,7 +406,7 @@ async def reconcile_gpu_leases() -> None:
 
 
 async def dispatch_schedules(redis: Redis) -> None:
-    """Create queued runs for due interval schedules with an atomic next-run advance."""
+    """Create queued runs for due schedules with an atomic next-run advance."""
     current = now()
     async with AdminSessionLocal() as db:
         schedules = (await db.execute(select(WorkflowSchedule).where(WorkflowSchedule.active.is_(True), WorkflowSchedule.next_run_at <= current).order_by(WorkflowSchedule.next_run_at).limit(50).with_for_update(skip_locked=True))).scalars().all()
@@ -299,7 +414,10 @@ async def dispatch_schedules(redis: Redis) -> None:
         for schedule in schedules:
             workflow = await db.scalar(select(Workflow).where(Workflow.id == schedule.workflow_id, Workflow.tenant_id == schedule.tenant_id, Workflow.status == "published"))
             if not workflow or not workflow.published_version:
-                schedule.next_run_at = current + timedelta(seconds=max(10, schedule.interval_seconds))
+                try:
+                    schedule.next_run_at = next_schedule_time(schedule.cron_expression, schedule.timezone, schedule.interval_seconds, current)
+                except ValueError:
+                    schedule.active = False
                 continue
             project = await db.scalar(select(Project).where(Project.id == workflow.project_id, Project.tenant_id == workflow.tenant_id))
             cost_center = f"project:{project.slug}"[:120] if project and project.slug else "workflow"
@@ -308,7 +426,10 @@ async def dispatch_schedules(redis: Redis) -> None:
             await db.flush()
             queued_ids.append(run.id)
             schedule.last_run_at = current
-            schedule.next_run_at = current + timedelta(seconds=max(10, schedule.interval_seconds))
+            try:
+                schedule.next_run_at = next_schedule_time(schedule.cron_expression, schedule.timezone, schedule.interval_seconds, current)
+            except ValueError:
+                schedule.active = False
         await db.commit()
     for run_id in queued_ids:
         await enqueue_job("workflow", run_id, redis)
@@ -562,6 +683,25 @@ async def execute_node(db, run: WorkflowRun, node_type: str, node_id: str, confi
     raise RuntimeError(f"不支持的工作流节点类型: {node_type}")
 
 
+def fair_order_messages(messages: list[tuple[str, dict[str, str]]]) -> list[tuple[str, dict[str, str]]]:
+    """Round-robin messages by tenant while keeping lower priority first."""
+    buckets: dict[str, list[tuple[str, dict[str, str]]]] = {}
+    for message_id, fields in messages:
+        tenant_id = fields.get("tenant_id") or "unknown"
+        buckets.setdefault(tenant_id, []).append((message_id, fields))
+    for bucket in buckets.values():
+        bucket.sort(key=lambda item: (int(item[1].get("priority", "5") or 5), item[0]))
+    ordered: list[tuple[str, dict[str, str]]] = []
+    while buckets:
+        for tenant_id in list(buckets):
+            bucket = buckets[tenant_id]
+            if bucket:
+                ordered.append(bucket.pop(0))
+            if not bucket:
+                buckets.pop(tenant_id, None)
+    return ordered
+
+
 async def worker_loop() -> None:
     settings = get_settings()
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
@@ -611,30 +751,40 @@ async def worker_loop() -> None:
                 )
                 messages = batches[0][1] if batches else []
 
-            for message_id, fields in messages:
+            ordered_messages = fair_order_messages(messages)
+            global_limit = asyncio.Semaphore(max(1, settings.worker_max_concurrency))
+            tenant_limits: dict[str, asyncio.Semaphore] = {}
+
+            async def process_message(message_id: str, fields: dict[str, str]) -> None:
                 kind = fields.get("kind", "")
                 resource_id = fields.get("resource_id", "")
-                attempts = int(fields.get("attempts", "0"))
+                tenant_id = fields.get("tenant_id") or "unknown"
+                attempts = int(fields.get("attempts", "0") or 0)
+                tenant_limit = tenant_limits.setdefault(tenant_id, asyncio.Semaphore(max(1, settings.worker_per_tenant_concurrency)))
                 try:
-                    if kind == "workflow":
-                        await execute_run(resource_id)
-                    elif kind == "knowledge_index":
-                        await execute_index(resource_id)
-                    elif kind == "evaluation":
-                        await execute_evaluation(resource_id)
-                    elif kind == "sandbox":
-                        await execute_sandbox(resource_id)
-                    elif kind == "publication_delivery":
-                        await deliver_publication(resource_id)
-                    else:
-                        raise ValueError(f"unsupported job kind: {kind}")
+                    async with global_limit, tenant_limit:
+                        async with asyncio.timeout(max(10, settings.worker_job_timeout_seconds)):
+                            if kind == "workflow":
+                                await execute_run(resource_id)
+                            elif kind == "knowledge_index":
+                                await execute_index(resource_id)
+                            elif kind == "evaluation":
+                                await execute_evaluation(resource_id)
+                            elif kind == "sandbox":
+                                await execute_sandbox(resource_id)
+                            elif kind == "publication_delivery":
+                                await deliver_publication(resource_id)
+                            else:
+                                raise ValueError(f"unsupported job kind: {kind}")
                 except Exception as exc:
                     logging.getLogger("enterprise_ai_platform.worker").exception(
-                        "job failed kind=%s resource_id=%s attempt=%s", kind, resource_id, attempts + 1
+                        "job failed kind=%s resource_id=%s tenant_id=%s attempt=%s", kind, resource_id, tenant_id, attempts + 1
                     )
                     retry_fields = {
                         "kind": kind,
                         "resource_id": resource_id,
+                        "tenant_id": tenant_id,
+                        "priority": fields.get("priority", "5"),
                         "queued_at": fields.get("queued_at", now().isoformat()),
                         "attempts": str(attempts + 1),
                         "last_error": str(exc)[:1000],
@@ -644,5 +794,7 @@ async def worker_loop() -> None:
                 finally:
                     await redis.xack(settings.job_stream, settings.job_consumer_group, message_id)
                     await redis.xdel(settings.job_stream, message_id)
+
+            await asyncio.gather(*(process_message(message_id, fields) for message_id, fields in ordered_messages))
     finally:
         await redis.aclose()

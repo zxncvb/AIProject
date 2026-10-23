@@ -65,6 +65,27 @@ class ScimToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ScimGroup(Base):
+    __tablename__ = "scim_groups"
+    __table_args__ = (UniqueConstraint("tenant_id", "display_name", name="uq_scim_group_tenant_name"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    display_name: Mapped[str] = mapped_column(String(160))
+    external_id: Mapped[str] = mapped_column(String(160), default="")
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ScimGroupMember(Base):
+    __tablename__ = "scim_group_members"
+    __table_args__ = (UniqueConstraint("group_id", "user_id", name="uq_scim_group_member"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    group_id: Mapped[str] = mapped_column(ForeignKey("scim_groups.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Membership(Base):
     __tablename__ = "memberships"
     __table_args__ = (UniqueConstraint("user_id", "tenant_id", name="uq_membership_user_tenant"),)
@@ -72,6 +93,7 @@ class Membership(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
     role: Mapped[str] = mapped_column(String(40), default="viewer")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     custom_role_id: Mapped[str | None] = mapped_column(ForeignKey("roles.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -159,6 +181,30 @@ class Agent(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class AgentConversation(Base):
+    __tablename__ = "agent_conversations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(160), default="新会话")
+    messages_json: Mapped[list[dict[str, Any]]] = mapped_column(JsonType, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, index=True)
+
+
+class AgentMemory(Base):
+    __tablename__ = "agent_memories"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    memory_key: Mapped[str] = mapped_column(String(120), default="")
+    content: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Workflow(Base):
     __tablename__ = "workflows"
     __table_args__ = (UniqueConstraint("tenant_id", "project_id", "slug", name="uq_workflow_scope_slug"),)
@@ -240,6 +286,8 @@ class Document(Base):
     extraction_method: Mapped[str] = mapped_column(String(30), default="parser")
     security_status: Mapped[str] = mapped_column(String(30), default="clean", index=True)
     security_report_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    storage_key: Mapped[str] = mapped_column(String(500), default="")
+    storage_backend: Mapped[str] = mapped_column(String(30), default="local")
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -372,6 +420,8 @@ class AuditEvent(Base):
     resource_type: Mapped[str] = mapped_column(String(80), default="")
     resource_id: Mapped[str] = mapped_column(String(80), default="")
     detail_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    prev_hash: Mapped[str] = mapped_column(String(64), default="")
+    event_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
@@ -394,7 +444,10 @@ class WorkflowSchedule(Base):
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
     workflow_id: Mapped[str] = mapped_column(ForeignKey("workflows.id"), index=True)
     environment: Mapped[str] = mapped_column(String(40), default="production")
-    interval_seconds: Mapped[int] = mapped_column(Integer)
+    interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cron_expression: Mapped[str] = mapped_column(String(120), default="")
+    timezone: Mapped[str] = mapped_column(String(80), default="UTC")
+    misfire_policy: Mapped[str] = mapped_column(String(20), default="skip")
     next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     input_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
@@ -415,6 +468,9 @@ class Application(Base):
     app_type: Mapped[str] = mapped_column(String(30), default="low_code")
     status: Mapped[str] = mapped_column(String(30), default="draft")
     runtime_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    custom_domain: Mapped[str] = mapped_column(String(253), default="")
+    tls_secret_name: Mapped[str] = mapped_column(String(253), default="")
+    public_rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=120)
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -473,6 +529,19 @@ class ApplicationDeployment(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class ApplicationAccessLog(Base):
+    __tablename__ = "application_access_logs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    application_id: Mapped[str] = mapped_column(ForeignKey("applications.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=0)
+    request_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    status_code: Mapped[int] = mapped_column(Integer, default=200)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    client_ip_hash: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class ComputeQuota(Base):
     __tablename__ = "compute_quotas"
     __table_args__ = (UniqueConstraint("tenant_id", name="uq_compute_quota_tenant"),)
@@ -499,6 +568,22 @@ class ComputeUsage(Base):
     gpu_seconds: Mapped[int] = mapped_column(Integer, default=0)
     tokens: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class VendorBillingRecord(Base):
+    __tablename__ = "vendor_billing_records"
+    __table_args__ = (UniqueConstraint("tenant_id", "provider_name", "external_id", name="uq_vendor_billing_external"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    provider_name: Mapped[str] = mapped_column(String(120), index=True)
+    external_id: Mapped[str] = mapped_column(String(180))
+    billing_period: Mapped[str] = mapped_column(String(40), index=True)
+    currency: Mapped[str] = mapped_column(String(12), default="CNY")
+    billed_amount: Mapped[float] = mapped_column(Float, default=0)
+    billed_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    billed_gpu_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    source_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
 class GpuLease(Base):

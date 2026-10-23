@@ -13,13 +13,32 @@ class Settings(BaseSettings):
     database_admin_url: str = ""
     redis_url: str = "redis://redis:6379/0"
     jwt_expire_minutes: int = 480
+    jwt_refresh_expire_days: int = 30
+    login_failure_limit: int = 5
+    login_lock_minutes: int = 15
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_use_tls: bool = True
+    password_reset_ttl_minutes: int = 30
+    frontend_base_url: str = "http://localhost:13000"
     bootstrap_tenant: str = "Acme Corporation"
     bootstrap_tenant_slug: str = "acme"
     bootstrap_admin_email: str = "admin@acme.local"
     bootstrap_admin_password: str = "ChangeMe_123456"
     otel_exporter_otlp_endpoint: str = ""
     allowed_http_hosts: str = ""
+    database_allowed_hosts: str = ""
     artifact_dir: str = "./data/artifacts"
+    storage_backend: str = "local"
+    s3_endpoint_url: str = ""
+    s3_bucket: str = ""
+    s3_region: str = ""
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_presign_expire_seconds: int = 900
     model_timeout_seconds: int = 120
     cors_origins: str = "http://localhost:13000,http://localhost:3000"
     trusted_hosts: str = "*"
@@ -29,6 +48,7 @@ class Settings(BaseSettings):
     upload_allow_macros: bool = False
     upload_dlp_action: str = "report"
     knowledge_max_extracted_chars: int = 5000000
+    knowledge_candidate_limit: int = 5000
     clamav_host: str = ""
     clamav_port: int = 3310
     clamav_required: bool = False
@@ -84,6 +104,9 @@ class Settings(BaseSettings):
     job_consumer_group: str = "enterprise-workers"
     worker_claim_idle_ms: int = 60000
     worker_max_attempts: int = 5
+    worker_max_concurrency: int = 8
+    worker_per_tenant_concurrency: int = 2
+    worker_job_timeout_seconds: int = 3600
     sandbox_runtime_class: str = ""
     sandbox_ephemeral_storage_mb: int = 256
     evaluation_queue: str = "ai_platform:evaluation_jobs"
@@ -98,12 +121,17 @@ class Settings(BaseSettings):
     application_buildkit_image: str = "moby/buildkit:v0.20.2-rootless"
     application_runtime_class: str = ""
     publication_signing_secret: str = ""
+    public_app_default_rate_limit: int = 120
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
     @property
     def allowed_hosts(self) -> set[str]:
         return {item.strip().lower() for item in self.allowed_http_hosts.split(",") if item.strip()}
+
+    @property
+    def database_allowed_host_list(self) -> set[str]:
+        return {item.strip().lower().rstrip(".") for item in self.database_allowed_hosts.split(",") if item.strip()}
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -131,6 +159,28 @@ class Settings(BaseSettings):
     def gpu_node_name_list(self) -> list[str]:
         return [item.strip() for item in self.gpu_node_names.split(",") if item.strip()]
 
+
+def validate_runtime_settings(settings: Settings) -> None:
+    '''Reject unsafe defaults before a production process starts.'''
+    environment = settings.app_env.strip().lower()
+    if environment not in {'production', 'prod'}:
+        return
+
+    errors: list[str] = []
+    if not settings.app_secret_key or settings.app_secret_key == 'change-me-in-production':
+        errors.append('APP_SECRET_KEY must be a unique production secret')
+    if not settings.bootstrap_admin_password or settings.bootstrap_admin_password == 'ChangeMe_123456':
+        errors.append('BOOTSTRAP_ADMIN_PASSWORD must be changed')
+    if settings.database_url.lower().startswith('sqlite') or settings.database_admin_url.lower().startswith('sqlite'):
+        errors.append('production requires PostgreSQL; SQLite is not supported')
+    if settings.trusted_hosts.strip() == '*':
+        errors.append('TRUSTED_HOSTS must restrict allowed hostnames')
+    if settings.storage_backend.strip().lower() == 's3' and not settings.s3_bucket:
+        errors.append('S3_BUCKET is required when STORAGE_BACKEND=s3')
+    if settings.smtp_host and not settings.smtp_from:
+        errors.append('SMTP_FROM is required when SMTP_HOST is configured')
+    if errors:
+        raise RuntimeError('Unsafe production configuration: ' + '; '.join(errors))
 
 @lru_cache
 def get_settings() -> Settings:

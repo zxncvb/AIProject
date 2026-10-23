@@ -188,3 +188,21 @@
 当前版本适合内部 POC、单团队试点和有条件的企业私有化交付，不适合直接作为通用公有云 SaaS 售卖。首个付费项目之前建议优先完成 Agent 工具调用与流式输出、账号生命周期、公开应用结果闭环、生产启动安全守卫、集成/E2E 测试和部署可靠性整改。
 
 详细证据与验收建议见 COMMERCIAL_READINESS_ASSESSMENT.md。
+
+## 2026-10-23：商用就绪度审计整改进展
+
+本轮已完成并纳入代码与迁移链的整改：
+
+- Agent 已支持租户隔离的 Plugin/MCP/Skill 工具调用、最多三轮 Agent Loop、同步与 SSE 流式输出、工具审计和使用量记录；新增 Agent 会话持久化、查询与删除接口。
+- Agent 长期记忆已增加租户/用户隔离的写入、读取、删除和保留期控制，并在启用时注入同步与流式对话上下文。
+- 账号生命周期已补充 refresh/logout、密码重置令牌、SMTP 邮件发送、开发环境调试令牌、会话撤销和前端重置密码页面。
+- 生产启动守卫、生产文档关闭、移除启动期 `create_all`、Cron/DST、Worker 公平调度、RAG rerank、S3 对象存储、WAL/PITR、审计哈希链、数据库连接器 Host 白名单、SCIM Groups、评测 judge/regression gate 和供应商账单导入已落地。
+- 公开应用结果查询已支持签名令牌、过期/撤销、租户与应用绑定；CD 已调整为迁移成功后切换镜像，并在发布后执行 `/readyz` 检查；新增表已纳入 PostgreSQL RLS 脚本。
+- Redis 限流不可用时已降级到进程内限流，不再直接放行；新增租户成员邀请接口，并在 CI 冒烟测试中验证“邀请→设置密码→登录”闭环；控制台 Agent 测试面板已切换到 SSE 逐 token 展示。
+- CD 镜像发布已增加 SBOM 生成、Trivy 高危漏洞门禁和 Cosign keyless 签名。
+- Compose 已提供可选 `kubernetes` profile，用于启动全代码应用控制器和沙箱控制器；默认开发拓扑不会在没有 Kubernetes 凭据时误启动托管控制器。
+- 浏览器认证已迁移到 HttpOnly Cookie（生产环境 Secure、SameSite=Lax），浏览器模式不再在响应 JSON 中返回 JWT；Bearer/API Key 仍保留给外部客户端，CI 冒烟测试覆盖 Cookie 访问、刷新和登出。
+- 应用中心已增加自定义域名、TLS Secret、应用级公开调用配额和租户隔离访问日志；全代码应用生成的 Ingress 会绑定对应域名与证书 Secret。
+- 公开 API 已补充最小 Python SDK（`sdk/python`），统一使用 `/api/v1/public` 版本化路径；CI 新增后端服务层覆盖率报告与 20% 门禁，并上传 `coverage.xml` 供发布验收留档。
+
+本机已通过 Python 语法检查、Alembic head 检查、前端生产构建和 `git diff --check`。当前环境没有 Docker 引擎，且本机 Python 3.14 的 Pydantic 依赖版本不匹配，因此 Compose 集成测试、pytest 和真实数据库迁移需要在 CI 的 Python 3.12/Docker 环境中复验。

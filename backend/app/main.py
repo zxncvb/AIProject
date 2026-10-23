@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import re
@@ -8,12 +10,13 @@ import secrets
 import time
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 import httpx
 import asyncpg
 import asyncmy
@@ -22,16 +25,19 @@ import oracledb
 import jwt
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
-from sqlalchemy import delete, desc, func, select
+from sqlalchemy import delete, desc, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import get_settings
+from .config import get_settings, validate_runtime_settings
 from .db import AdminSessionLocal, Base, SessionLocal, admin_engine, engine, get_admin_db, get_db
 from .deps import AdminContext, Context, EditorContext, OperatorContext, PermissionAdminContext, RequestContext
 from .models import (
     Agent,
+    AgentConversation,
+    AgentMemory,
     Application,
+    ApplicationAccessLog,
     ApplicationBuild,
     ApplicationDeployment,
     ApplicationVersion,
@@ -55,10 +61,13 @@ from .models import (
     Project,
     Role,
     ScimToken,
+    ScimGroup,
+    ScimGroupMember,
     Skill,
     Tenant,
     TenantPolicy,
     User,
+    VendorBillingRecord,
     Workflow,
     WorkflowRelease,
     WorkflowRun,
@@ -85,6 +94,7 @@ from .models import (
 )
 from .schemas import (
     AgentChatRequest,
+    AgentMemoryCreate,
     AgentCreate,
     ApplicationCreate,
     ApplicationBuildCreate,
@@ -99,12 +109,15 @@ from .schemas import (
     LoginRequest,
     LoginResponse,
     MemberCreate,
+    MemberInviteRequest,
     MemberRoleUpdate,
     MCPServerCreate,
     ModelTestRequest,
     OIDCCallbackRequest,
     OIDCStartRequest,
     PasswordChangeRequest,
+    PasswordResetConfirm,
+    PasswordResetRequest,
     MFACodeRequest,
     MFADisableRequest,
     ScimTokenCreate,
@@ -116,7 +129,10 @@ from .schemas import (
     ProviderUpdate,
     QuotaUpdate,
     TenantPolicyUpdate,
+    TenantCreate,
     PublicAppInvokeRequest,
+    RefreshTokenRequest,
+    LogoutRequest,
     EvaluationRequest,
     EvaluationJobCreate,
     GpuLeaseRequest,
@@ -157,25 +173,50 @@ from .schemas import (
     AgentFeedbackCreate,
     ApiKeyCreate,
 )
-from .security import create_access_token, decrypt_secret, encrypt_secret, hash_password, secret_backend_status, verify_password
+from .security import create_access_token, create_refresh_token, decode_access_token, decode_refresh_token, decrypt_secret, encrypt_secret, hash_password, secret_backend_status, verify_password
+from .services.auth_sessions import clear_login_failures, consume_password_reset, create_password_reset, is_login_locked, is_token_revoked, record_login_failure, revoke_token, revoke_user_sessions
 from .services.crypto import checksum, chunk_text
 from .services.knowledge import search_chunks
 from .services.identity import BUILTIN_ROLES, mapped_role, parse_role_mapping
 from .services.ldap_auth import LDAPError, authenticate as ldap_authenticate
 from .services.llm import call_chat, call_routed_chat
+from .services.mailer import send_email
+from .services.agent_runtime import run_agent_loop, stream_agent_loop
 from .services.oidc import OIDCError, create_authorization_url, exchange_code
 from .services.observability import application_deployment_failed, approval_pending, job_dead_messages, job_queue_messages, metrics_payload, publication_failed, setup_telemetry
+from .services.rate_limit import allow_local
 from .services.safety import inspect_text
 from .services.vector import embed
 from .services.alerts import send_alert
-from .services.application_runtime import build_application_manifests, build_buildkit_manifest, build_image_name, validate_build_source
+from .services.application_runtime import build_application_manifests, build_buildkit_manifest, build_image_name, validate_application_domain, validate_build_source
 from .services.content_security import DOCUMENT_EXTENSIONS, extract_text, inspect_upload
+from .services.evaluation import judge_answer
 from .services.sandbox import build_job_manifest
+from .services.storage import content_type_for, delete_object, get_bytes, object_key, presign_get, put_bytes
 from .services.totp import provisioning_uri, random_base32, verify as verify_totp
-from .services.workflow import enqueue_evaluation, enqueue_index, enqueue_job, enqueue_run, enqueue_sandbox, ordered_nodes
+from .services.workflow import enqueue_evaluation, enqueue_index, enqueue_job, enqueue_run, enqueue_sandbox, next_schedule_time, ordered_nodes
 
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+class JsonLogFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        for field in ("request_id", "tenant_id", "user_id", "route", "status_code", "latency_ms"):
+            value = getattr(record, field, None)
+            if value is not None:
+                payload[field] = value
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+for _handler in logging.getLogger().handlers:
+    _handler.setFormatter(JsonLogFormatter())
 logger = logging.getLogger("enterprise_ai_platform")
 
 PERMISSION_CATALOG = [
@@ -194,6 +235,27 @@ PUBLIC_API_SCOPES = {"agent:invoke", "workflow:run"}
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
+    settings = get_settings()
+    secure = settings.app_env.lower() == "production"
+    response.set_cookie("eai_access_token", access_token, max_age=settings.jwt_expire_minutes * 60, httponly=True, secure=secure, samesite="lax", path="/")
+    response.set_cookie("eai_refresh_token", refresh_token, max_age=settings.jwt_refresh_expire_days * 86400, httponly=True, secure=secure, samesite="lax", path="/api/auth")
+
+
+def clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie("eai_access_token", path="/")
+    response.delete_cookie("eai_refresh_token", path="/api/auth")
+
+
+def make_login_response(access_token: str, refresh_token: str, user: User, membership: Membership, tenant: Tenant, *, browser_session: bool = False) -> LoginResponse:
+    return LoginResponse(
+        access_token="" if browser_session else access_token,
+        refresh_token=None if browser_session else refresh_token,
+        user={"id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role},
+        tenant={"id": tenant.id, "name": tenant.name, "slug": tenant.slug},
+    )
 
 
 TENANT_ADMIN_ROLES = {"owner", "admin"}
@@ -277,6 +339,11 @@ async def resolve_workspace_id(
 
 async def audit(db: AsyncSession, ctx: RequestContext | None, action: str, resource_type: str = "", resource_id: str = "", detail: dict[str, Any] | None = None) -> None:
     db.add(AuditEvent(tenant_id=ctx.tenant_id if ctx else "system", actor_id=ctx.user_id if ctx else None, action=action, resource_type=resource_type, resource_id=resource_id, detail_json=detail or {}))
+
+
+async def audit_login(db: AsyncSession, user: User | None, tenant_id: str | None, action: str, detail: dict[str, Any] | None = None) -> None:
+    if tenant_id:
+        db.add(AuditEvent(tenant_id=tenant_id, actor_id=user.id if user else None, action=action, resource_type="authentication", resource_id=user.id if user else "", detail_json=detail or {}))
 
 
 async def tenant_policy(db: AsyncSession, tenant_id: str) -> TenantPolicy:
@@ -377,8 +444,6 @@ def validate_knowledge_asset(asset_type: str, content: dict[str, Any]) -> None:
 
 async def bootstrap() -> None:
     settings = get_settings()
-    async with admin_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
     async with AdminSessionLocal() as db:
         tenant = await db.scalar(select(Tenant).where(Tenant.slug == settings.bootstrap_tenant_slug))
         if not tenant:
@@ -458,6 +523,8 @@ async def refresh_operational_metrics() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = get_settings()
+    validate_runtime_settings(settings)
     setup_telemetry()
     await bootstrap()
     metrics_task = asyncio.create_task(refresh_operational_metrics())
@@ -475,15 +542,28 @@ class UTF8JSONResponse(JSONResponse):
     media_type = "application/json; charset=utf-8"
 
 
-app = FastAPI(title="Enterprise AI Platform", version="0.1.0", lifespan=lifespan, default_response_class=UTF8JSONResponse)
-app.add_middleware(CORSMiddleware, allow_origins=get_settings().cors_origin_list, allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+runtime_settings = get_settings()
+_openapi_enabled = runtime_settings.app_env.strip().lower() not in {"production", "prod"}
+app = FastAPI(
+    title="Enterprise AI Platform",
+    version="0.1.0",
+    lifespan=lifespan,
+    default_response_class=UTF8JSONResponse,
+    docs_url="/docs" if _openapi_enabled else None,
+    redoc_url="/redoc" if _openapi_enabled else None,
+    openapi_url="/openapi.json" if _openapi_enabled else None,
+)
+app.add_middleware(CORSMiddleware, allow_origins=get_settings().cors_origin_list, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 if get_settings().trusted_host_list != ["*"]:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=get_settings().trusted_host_list)
 
 
 @app.middleware("http")
-async def security_middleware(request, call_next):
+async def security_middleware(request: Request, call_next):
     """Apply baseline browser security headers and Redis-backed API throttling."""
+    request_id = request.headers.get("X-Request-ID") or secrets.token_hex(16)
+    request.state.request_id = request_id
+    started = time.perf_counter()
     if request.url.path.startswith("/api/") or request.url.path.startswith("/public/"):
         window = 60
         limit = 20 if request.url.path.startswith("/api/auth/") else (120 if request.url.path.startswith("/public/") else 300)
@@ -497,9 +577,15 @@ async def security_middleware(request, call_next):
             if count > limit:
                 response = JSONResponse({"detail": "请求过于频繁，请稍后重试"}, status_code=429)
                 response.headers["Retry-After"] = str(window)
+                response.headers["X-Request-ID"] = request_id
                 return response
         except Exception:
             logger.warning("rate limiter unavailable", exc_info=True)
+            if not await allow_local(f"{client_ip}:{request.url.path.split('/')[2]}", limit, window):
+                response = JSONResponse({"detail": "请求过于频繁，请稍后重试"}, status_code=429)
+                response.headers["Retry-After"] = str(window)
+                response.headers["X-Request-ID"] = request_id
+                return response
         finally:
             await redis.aclose()
     response = await call_next(request)
@@ -510,6 +596,18 @@ async def security_middleware(request, call_next):
     response.headers["Content-Security-Policy"] = "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"
     if get_settings().app_env == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "http_request",
+        extra={
+            "request_id": request_id,
+            "tenant_id": getattr(request.state, "tenant_id", None),
+            "user_id": getattr(request.state, "user_id", None),
+            "route": request.url.path,
+            "status_code": response.status_code,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        },
+    )
     return response
 
 
@@ -572,7 +670,7 @@ async def retry_dead_job(message_id: str, ctx: AdminContext, db: AsyncSession = 
         kind, resource_id = fields.get("kind", ""), fields.get("resource_id", "")
         if kind not in {"workflow", "knowledge_index", "evaluation", "sandbox", "publication_delivery"} or not resource_id:
             raise HTTPException(status_code=422, detail="死信任务内容无效")
-        new_id = await redis.xadd(settings.job_stream, {"kind": kind, "resource_id": resource_id, "attempts": "0", "queued_at": utcnow().isoformat(), "retry_of": message_id}, maxlen=100000, approximate=True)
+        new_id = await redis.xadd(settings.job_stream, {"kind": kind, "resource_id": resource_id, "tenant_id": fields.get("tenant_id", "unknown"), "priority": fields.get("priority", "5"), "attempts": "0", "queued_at": utcnow().isoformat(), "retry_of": message_id}, maxlen=100000, approximate=True)
         await redis.xdel(f"{settings.job_stream}:dead", message_id)
     finally:
         await redis.aclose()
@@ -582,9 +680,16 @@ async def retry_dead_job(message_id: str, ctx: AdminContext, db: AsyncSession = 
 
 
 @app.post("/api/auth/login", response_model=LoginResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_admin_db)):
+async def login(body: LoginRequest, response: Response, browser_session: str | None = Header(default=None, alias="X-Browser-Session"), db: AsyncSession = Depends(get_admin_db)):
+    if await is_login_locked(body.email):
+        logger.warning("login_locked", extra={"route": "/api/auth/login"})
+        raise HTTPException(status_code=429, detail={"code": "account_locked", "message": "登录失败次数过多，请稍后再试"})
     user = await db.scalar(select(User).where(User.email == body.email, User.is_active.is_(True)))
     if not user or not verify_password(body.password, user.password_hash):
+        tenant_id = await db.scalar(select(Membership.tenant_id).where(Membership.user_id == user.id, Membership.is_active.is_(True)).order_by(Membership.created_at)) if user else None
+        locked = await record_login_failure(body.email)
+        await audit_login(db, user, tenant_id, "auth.login.failure", {"locked": locked, "reason": "invalid_credentials"})
+        await db.commit()
         raise HTTPException(status_code=401, detail="邮箱或密码错误")
     if user.mfa_enabled:
         if not body.mfa_code:
@@ -594,16 +699,139 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_admin_db)):
         except Exception:
             valid = False
         if not valid:
+            tenant_id = await db.scalar(select(Membership.tenant_id).where(Membership.user_id == user.id, Membership.is_active.is_(True)).order_by(Membership.created_at))
+            locked = await record_login_failure(body.email)
+            await audit_login(db, user, tenant_id, "auth.login.failure", {"locked": locked, "reason": "mfa_invalid"})
+            await db.commit()
             raise HTTPException(status_code=401, detail={"code": "mfa_invalid", "message": "多因素验证码无效"})
-    stmt = select(Membership, Tenant).join(Tenant, Tenant.id == Membership.tenant_id).where(Membership.user_id == user.id, Tenant.is_active.is_(True))
+    stmt = select(Membership, Tenant).join(Tenant, Tenant.id == Membership.tenant_id).where(Membership.user_id == user.id, Membership.is_active.is_(True), Tenant.is_active.is_(True))
     if body.tenant_slug:
         stmt = stmt.where(Tenant.slug == body.tenant_slug)
     row = (await db.execute(stmt)).first()
     if not row:
         raise HTTPException(status_code=403, detail="用户没有可访问的租户")
+    await clear_login_failures(body.email)
     membership, tenant = row
+    await audit_login(db, user, tenant.id, "auth.login.success", {"method": "password"})
+    await db.commit()
     token = create_access_token(user.id, tenant.id, membership.role)
-    return LoginResponse(access_token=token, user={"id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role}, tenant={"id": tenant.id, "name": tenant.name, "slug": tenant.slug})
+    refresh_token = create_refresh_token(user.id, tenant.id, membership.role)
+    set_auth_cookies(response, token, refresh_token)
+    return make_login_response(token, refresh_token, user, membership, tenant, browser_session=browser_session == "1")
+
+
+@app.post("/api/auth/password-reset/request")
+async def request_password_reset(body: PasswordResetRequest, db: AsyncSession = Depends(get_admin_db)):
+    settings = get_settings()
+    email = body.email.strip().lower()
+    stmt = (
+        select(User, Membership, Tenant)
+        .join(Membership, (Membership.user_id == User.id) & (Membership.is_active.is_(True)))
+        .join(Tenant, (Tenant.id == Membership.tenant_id) & (Tenant.is_active.is_(True)))
+        .where(User.email == email, User.is_active.is_(True))
+        .order_by(Membership.created_at)
+    )
+    if body.tenant_slug:
+        stmt = stmt.where(Tenant.slug == body.tenant_slug.strip().lower())
+    row = (await db.execute(stmt)).first()
+    debug_token = None
+    if row:
+        user, membership, tenant = row
+        token = await create_password_reset(user.id, tenant.id, settings.password_reset_ttl_minutes * 60)
+        reset_url = f"{settings.frontend_base_url.rstrip('/')}/reset-password?token={token}"
+        if settings.smtp_host and settings.smtp_from:
+            try:
+                await send_email(
+                    user.email,
+                    "重置企业 AI 平台密码",
+                    f"请在 {settings.password_reset_ttl_minutes} 分钟内打开以下链接重置密码：\n\n{reset_url}\n\n如果这不是你的操作，请忽略此邮件。",
+                )
+            except Exception:
+                logger.exception("password_reset_email_failed", extra={"tenant_id": tenant.id, "user_id": user.id})
+        elif settings.app_env.lower() in {"development", "dev", "test", "testing"}:
+            debug_token = token
+        else:
+            logger.warning("password_reset_email_not_configured", extra={"tenant_id": tenant.id})
+        await audit_login(db, user, tenant.id, "auth.password_reset.request", {"email_delivery": bool(settings.smtp_host and settings.smtp_from)})
+        await db.commit()
+    response = {"accepted": True, "expires_in": settings.password_reset_ttl_minutes * 60}
+    if debug_token:
+        response["debug_token"] = debug_token
+    return response
+
+
+@app.post("/api/auth/password-reset/confirm")
+async def confirm_password_reset(body: PasswordResetConfirm, db: AsyncSession = Depends(get_admin_db)):
+    payload = await consume_password_reset(body.token)
+    if not payload:
+        raise HTTPException(status_code=400, detail="密码重置令牌无效或已过期")
+    user_id = str(payload.get("user_id") or "")
+    tenant_id = str(payload.get("tenant_id") or "")
+    row = (await db.execute(
+        select(User, Tenant, Membership)
+        .join(Membership, (Membership.user_id == User.id) & (Membership.is_active.is_(True)))
+        .join(Tenant, (Tenant.id == Membership.tenant_id) & (Tenant.is_active.is_(True)))
+        .where(User.id == user_id, Tenant.id == tenant_id, User.is_active.is_(True))
+    )).first()
+    if not row:
+        raise HTTPException(status_code=400, detail="密码重置令牌无效或用户已停用")
+    user, tenant, _membership = row
+    user.password_hash = hash_password(body.new_password)
+    await revoke_user_sessions(user.id)
+    await audit_login(db, user, tenant.id, "auth.password_reset.confirm", {})
+    await db.commit()
+    return {"reset": True}
+
+
+@app.post("/api/auth/refresh", response_model=LoginResponse)
+async def refresh_auth_token(body: RefreshTokenRequest, request: Request, response: Response, browser_session: str | None = Header(default=None, alias="X-Browser-Session"), db: AsyncSession = Depends(get_admin_db)):
+    refresh_token_input = body.refresh_token or request.cookies.get("eai_refresh_token")
+    if not refresh_token_input:
+        raise HTTPException(status_code=401, detail="缺少刷新令牌")
+    try:
+        claims = decode_refresh_token(refresh_token_input)
+        if await is_token_revoked(claims):
+            raise ValueError("refresh token revoked")
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="刷新令牌无效或已过期") from exc
+    user_id = str(claims.get("sub") or "")
+    tenant_id = str(claims.get("tenant_id") or "")
+    row = (await db.execute(
+        select(User, Tenant, Membership)
+        .join(Membership, (Membership.user_id == User.id) & (Membership.is_active.is_(True)))
+        .join(Tenant, Tenant.id == Membership.tenant_id)
+        .where(User.id == user_id, Tenant.id == tenant_id, User.is_active.is_(True), Tenant.is_active.is_(True))
+    )).first()
+    if not row:
+        raise HTTPException(status_code=401, detail="用户或租户已停用")
+    user, tenant, membership = row
+    await revoke_token(str(claims.get("jti") or ""), claims.get("exp"))
+    access_token = create_access_token(user.id, tenant.id, membership.role)
+    refresh_token = create_refresh_token(user.id, tenant.id, membership.role)
+    set_auth_cookies(response, access_token, refresh_token)
+    return make_login_response(access_token, refresh_token, user, membership, tenant, browser_session=browser_session == "1")
+
+
+@app.post("/api/auth/logout")
+async def logout_auth(request: Request, response: Response, body: LogoutRequest | None = None, authorization: str | None = Header(default=None)):
+    token = authorization.split(" ", 1)[1].strip() if authorization and " " in authorization else (authorization or "")
+    token = token or request.cookies.get("eai_access_token", "")
+    if token:
+        try:
+            claims = decode_access_token(token)
+            await revoke_token(str(claims.get("jti") or ""), claims.get("exp"))
+        except Exception:
+            pass
+    refresh_token_input = body.refresh_token if body else None
+    refresh_token_input = refresh_token_input or request.cookies.get("eai_refresh_token")
+    if refresh_token_input:
+        try:
+            claims = decode_refresh_token(refresh_token_input)
+            await revoke_token(str(claims.get("jti") or ""), claims.get("exp"))
+        except Exception:
+            pass
+    clear_auth_cookies(response)
+    return {"revoked": True}
 
 
 @app.post("/api/auth/oidc/start")
@@ -624,7 +852,7 @@ async def oidc_start(body: OIDCStartRequest):
 
 
 @app.post("/api/auth/ldap/login", response_model=LoginResponse)
-async def ldap_login(body: LDAPLoginRequest, db: AsyncSession = Depends(get_admin_db)):
+async def ldap_login(body: LDAPLoginRequest, response: Response, browser_session: str | None = Header(default=None, alias="X-Browser-Session"), db: AsyncSession = Depends(get_admin_db)):
     settings = get_settings()
     try:
         identity = await asyncio.to_thread(ldap_authenticate, body.email, body.password)
@@ -651,13 +879,19 @@ async def ldap_login(body: LDAPLoginRequest, db: AsyncSession = Depends(get_admi
         membership = Membership(user_id=user.id, tenant_id=tenant.id, role="viewer")
         db.add(membership)
         await db.flush()
+    elif not membership.is_active:
+        if not settings.ldap_auto_provision:
+            raise HTTPException(status_code=403, detail="LDAP 用户已停用")
+        membership.is_active = True
     await db.commit()
     token = create_access_token(user.id, tenant.id, membership.role)
-    return LoginResponse(access_token=token, user={"id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role}, tenant={"id": tenant.id, "name": tenant.name, "slug": tenant.slug})
+    refresh_token = create_refresh_token(user.id, tenant.id, membership.role)
+    set_auth_cookies(response, token, refresh_token)
+    return make_login_response(token, refresh_token, user, membership, tenant, browser_session=browser_session == "1")
 
 
 @app.post("/api/auth/oidc/callback", response_model=LoginResponse)
-async def oidc_callback(body: OIDCCallbackRequest, db: AsyncSession = Depends(get_admin_db)):
+async def oidc_callback(body: OIDCCallbackRequest, response: Response, browser_session: str | None = Header(default=None, alias="X-Browser-Session"), db: AsyncSession = Depends(get_admin_db)):
     settings = get_settings()
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     try:
@@ -720,12 +954,18 @@ async def oidc_callback(body: OIDCCallbackRequest, db: AsyncSession = Depends(ge
         )
         db.add(membership)
         await db.flush()
+    elif not membership.is_active:
+        if not settings.oidc_auto_provision:
+            raise HTTPException(status_code=403, detail="用户已停用")
+        membership.is_active = True
     elif settings.oidc_sync_roles:
         membership.role = target_role if target_role in BUILTIN_ROLES else "viewer"
         membership.custom_role_id = custom_role.id if custom_role else None
     await db.commit()
     token = create_access_token(user.id, tenant.id, membership.role)
-    return LoginResponse(access_token=token, user={"id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role}, tenant={"id": tenant.id, "name": tenant.name, "slug": tenant.slug})
+    refresh_token = create_refresh_token(user.id, tenant.id, membership.role)
+    set_auth_cookies(response, token, refresh_token)
+    return make_login_response(token, refresh_token, user, membership, tenant, browser_session=browser_session == "1")
 
 
 @app.get("/api/me")
@@ -738,6 +978,7 @@ async def change_password(body: PasswordChangeRequest, ctx: Context, db: AsyncSe
     if not verify_password(body.current_password, ctx.user.password_hash):
         raise HTTPException(status_code=401, detail="当前密码不正确")
     ctx.user.password_hash = hash_password(body.new_password)
+    await revoke_user_sessions(ctx.user_id)
     await audit(db, ctx, "user.password.change", "user", ctx.user_id)
     await db.commit()
     return {"changed": True}
@@ -970,13 +1211,13 @@ async def scim_context(tenant_slug: str, authorization: str | None, db: AsyncSes
     return tenant, token
 
 
-def scim_user_payload(user: User, tenant_slug: str) -> dict[str, Any]:
+def scim_user_payload(user: User, tenant_slug: str, active: bool | None = None) -> dict[str, Any]:
     return {
         "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
         "id": user.id,
         "userName": user.email,
         "displayName": user.display_name,
-        "active": user.is_active,
+        "active": user.is_active if active is None else active,
         "meta": {"resourceType": "User", "location": f"/scim/v2.0/{tenant_slug}/Users/{user.id}"},
     }
 
@@ -984,9 +1225,9 @@ def scim_user_payload(user: User, tenant_slug: str) -> dict[str, Any]:
 @app.get("/scim/v2.0/{tenant_slug}/Users")
 async def scim_list_users(tenant_slug: str, authorization: str | None = Header(default=None), startIndex: int = 1, count: int = 100, db: AsyncSession = Depends(get_admin_db)):
     tenant, token = await scim_context(tenant_slug, authorization, db)
-    users = (await db.execute(select(User).join(Membership, Membership.user_id == User.id).where(Membership.tenant_id == tenant.id).order_by(User.email).offset(max(0, startIndex - 1)).limit(min(1000, max(1, count))))).scalars().all()
+    users = (await db.execute(select(User, Membership).join(Membership, Membership.user_id == User.id).where(Membership.tenant_id == tenant.id).order_by(User.email).offset(max(0, startIndex - 1)).limit(min(1000, max(1, count))))).all()
     await db.commit()
-    return {"schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], "totalResults": len(users), "startIndex": startIndex, "itemsPerPage": len(users), "Resources": [scim_user_payload(user, tenant.slug) for user in users]}
+    return {"schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], "totalResults": len(users), "startIndex": startIndex, "itemsPerPage": len(users), "Resources": [scim_user_payload(user, tenant.slug, membership.is_active) for user, membership in users]}
 
 
 @app.post("/scim/v2.0/{tenant_slug}/Users")
@@ -996,7 +1237,7 @@ async def scim_create_user(tenant_slug: str, body: ScimUserCreate, authorization
     user = await db.scalar(select(User).where(User.email == email))
     if user:
         raise HTTPException(status_code=409, detail="SCIM 用户已存在")
-    user = User(email=email, display_name=body.displayName or email, password_hash=hash_password(secrets.token_urlsafe(32)), is_active=body.active)
+    user = User(email=email, display_name=body.displayName or email, password_hash=hash_password(secrets.token_urlsafe(32)), is_active=True)
     db.add(user)
     await db.flush()
     role = "viewer"
@@ -1005,57 +1246,174 @@ async def scim_create_user(tenant_slug: str, body: ScimUserCreate, authorization
         if value in BUILTIN_ROLES:
             role = value
             break
-    db.add(Membership(user_id=user.id, tenant_id=tenant.id, role=role))
+    db.add(Membership(user_id=user.id, tenant_id=tenant.id, role=role, is_active=body.active))
     db.add(AuditEvent(tenant_id=tenant.id, actor_id=token.created_by, action="scim.user.create", resource_type="user", resource_id=user.id, detail_json={"email": email, "role": role}))
     await db.commit()
-    return scim_user_payload(user, tenant.slug)
+    return scim_user_payload(user, tenant.slug, body.active)
 
 
 @app.get("/scim/v2.0/{tenant_slug}/Users/{user_id}")
 async def scim_get_user(tenant_slug: str, user_id: str, authorization: str | None = Header(default=None), db: AsyncSession = Depends(get_admin_db)):
     tenant, token = await scim_context(tenant_slug, authorization, db)
-    user = await db.scalar(select(User).join(Membership, Membership.user_id == User.id).where(User.id == user_id, Membership.tenant_id == tenant.id))
-    if not user:
+    row = (await db.execute(select(User, Membership).join(Membership, Membership.user_id == User.id).where(User.id == user_id, Membership.tenant_id == tenant.id))).first()
+    if not row:
         raise HTTPException(status_code=404, detail="SCIM 用户不存在")
+    user, membership = row
     await db.commit()
-    return scim_user_payload(user, tenant.slug)
+    return scim_user_payload(user, tenant.slug, membership.is_active)
 
 
 @app.patch("/scim/v2.0/{tenant_slug}/Users/{user_id}")
 async def scim_patch_user(tenant_slug: str, user_id: str, body: ScimUserPatch, authorization: str | None = Header(default=None), db: AsyncSession = Depends(get_admin_db)):
     tenant, token = await scim_context(tenant_slug, authorization, db)
-    user = await db.scalar(select(User).join(Membership, Membership.user_id == User.id).where(User.id == user_id, Membership.tenant_id == tenant.id))
-    if not user:
+    row = (await db.execute(select(User, Membership).join(Membership, Membership.user_id == User.id).where(User.id == user_id, Membership.tenant_id == tenant.id))).first()
+    if not row:
         raise HTTPException(status_code=404, detail="SCIM 用户不存在")
+    user, membership = row
     for operation in body.Operations:
         path = str(operation.get("path") or "").lower()
         value = operation.get("value")
         if path == "active":
-            user.is_active = bool(value)
+            membership.is_active = bool(value)
         elif path == "displayname":
             user.display_name = str(value or "")
         elif path == "username":
             user.email = str(value).lower().strip()
         elif isinstance(value, dict):
             if "active" in value:
-                user.is_active = bool(value["active"])
+                membership.is_active = bool(value["active"])
             if "displayName" in value:
                 user.display_name = str(value["displayName"])
     db.add(AuditEvent(tenant_id=tenant.id, actor_id=token.created_by, action="scim.user.update", resource_type="user", resource_id=user.id, detail_json={"operations": body.Operations}))
     await db.commit()
-    return scim_user_payload(user, tenant.slug)
+    return scim_user_payload(user, tenant.slug, membership.is_active)
 
 
 @app.delete("/scim/v2.0/{tenant_slug}/Users/{user_id}")
 async def scim_delete_user(tenant_slug: str, user_id: str, authorization: str | None = Header(default=None), db: AsyncSession = Depends(get_admin_db)):
     tenant, token = await scim_context(tenant_slug, authorization, db)
-    user = await db.scalar(select(User).join(Membership, Membership.user_id == User.id).where(User.id == user_id, Membership.tenant_id == tenant.id))
-    if not user:
+    row = (await db.execute(select(User, Membership).join(Membership, Membership.user_id == User.id).where(User.id == user_id, Membership.tenant_id == tenant.id))).first()
+    if not row:
         raise HTTPException(status_code=404, detail="SCIM 用户不存在")
-    user.is_active = False
+    user, membership = row
+    membership.is_active = False
     db.add(AuditEvent(tenant_id=tenant.id, actor_id=token.created_by, action="scim.user.disable", resource_type="user", resource_id=user.id, detail_json={}))
     await db.commit()
     return {"deleted": True, "id": user_id}
+
+
+async def scim_group_payload(db: AsyncSession, group: ScimGroup, tenant_slug: str) -> dict[str, Any]:
+    rows = (await db.execute(
+        select(User).join(ScimGroupMember, ScimGroupMember.user_id == User.id).where(
+            ScimGroupMember.group_id == group.id,
+            ScimGroupMember.tenant_id == group.tenant_id,
+        ).order_by(User.email)
+    )).scalars().all()
+    return {
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        "id": group.id,
+        "displayName": group.display_name,
+        "externalId": group.external_id or None,
+        "members": [{"value": user.id, "display": user.display_name or user.email, "$ref": f"/scim/v2.0/{tenant_slug}/Users/{user.id}"} for user in rows],
+        "meta": {"resourceType": "Group", "location": f"/scim/v2.0/{tenant_slug}/Groups/{group.id}"},
+    }
+
+
+async def scim_group_user_ids(db: AsyncSession, tenant_id: str, members: Any) -> list[str]:
+    if not isinstance(members, list):
+        return []
+    ids = list(dict.fromkeys(str(item.get("value") or "") for item in members if isinstance(item, dict) and item.get("value")))
+    if not ids:
+        return []
+    rows = (await db.execute(select(User.id).join(Membership, Membership.user_id == User.id).where(User.id.in_(ids), Membership.tenant_id == tenant_id))).scalars().all()
+    found = set(rows)
+    missing = sorted(set(ids) - found)
+    if missing:
+        raise HTTPException(status_code=422, detail={"message": "SCIM Group 包含不属于该租户的用户", "user_ids": missing})
+    return [item for item in ids if item in found]
+
+
+@app.get("/scim/v2.0/{tenant_slug}/Groups")
+async def scim_list_groups(tenant_slug: str, authorization: str | None = Header(default=None), startIndex: int = 1, count: int = 100, db: AsyncSession = Depends(get_admin_db)):
+    tenant, token = await scim_context(tenant_slug, authorization, db)
+    groups = (await db.execute(select(ScimGroup).where(ScimGroup.tenant_id == tenant.id).order_by(ScimGroup.display_name).offset(max(0, startIndex - 1)).limit(min(1000, max(1, count))))).scalars().all()
+    resources = [await scim_group_payload(db, group, tenant.slug) for group in groups]
+    await db.commit()
+    return {"schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], "totalResults": len(resources), "startIndex": startIndex, "itemsPerPage": len(resources), "Resources": resources}
+
+
+@app.post("/scim/v2.0/{tenant_slug}/Groups")
+async def scim_create_group(tenant_slug: str, body: dict[str, Any], authorization: str | None = Header(default=None), db: AsyncSession = Depends(get_admin_db)):
+    tenant, token = await scim_context(tenant_slug, authorization, db)
+    display_name = str(body.get("displayName") or "").strip()
+    if not display_name or len(display_name) > 160:
+        raise HTTPException(status_code=422, detail="displayName 必须是 1-160 个字符")
+    members = await scim_group_user_ids(db, tenant.id, body.get("members", []))
+    group = ScimGroup(tenant_id=tenant.id, display_name=display_name, external_id=str(body.get("externalId") or "")[:160], created_by=token.created_by)
+    db.add(group)
+    await db.flush()
+    for user_id in members:
+        db.add(ScimGroupMember(tenant_id=tenant.id, group_id=group.id, user_id=user_id))
+    db.add(AuditEvent(tenant_id=tenant.id, actor_id=token.created_by, action="scim.group.create", resource_type="scim_group", resource_id=group.id, detail_json={"display_name": display_name, "members": members}))
+    await db.commit()
+    return await scim_group_payload(db, group, tenant.slug)
+
+
+@app.get("/scim/v2.0/{tenant_slug}/Groups/{group_id}")
+async def scim_get_group(tenant_slug: str, group_id: str, authorization: str | None = Header(default=None), db: AsyncSession = Depends(get_admin_db)):
+    tenant, token = await scim_context(tenant_slug, authorization, db)
+    group = await db.scalar(select(ScimGroup).where(ScimGroup.id == group_id, ScimGroup.tenant_id == tenant.id))
+    if not group:
+        raise HTTPException(status_code=404, detail="SCIM Group 不存在")
+    payload = await scim_group_payload(db, group, tenant.slug)
+    await db.commit()
+    return payload
+
+
+@app.patch("/scim/v2.0/{tenant_slug}/Groups/{group_id}")
+async def scim_patch_group(tenant_slug: str, group_id: str, body: dict[str, Any], authorization: str | None = Header(default=None), db: AsyncSession = Depends(get_admin_db)):
+    tenant, token = await scim_context(tenant_slug, authorization, db)
+    group = await db.scalar(select(ScimGroup).where(ScimGroup.id == group_id, ScimGroup.tenant_id == tenant.id))
+    if not group:
+        raise HTTPException(status_code=404, detail="SCIM Group 不存在")
+    for operation in body.get("Operations") or []:
+        if not isinstance(operation, dict):
+            continue
+        op = str(operation.get("op") or "replace").lower()
+        path = str(operation.get("path") or "").lower()
+        value = operation.get("value")
+        if path in {"displayname", "externalid"}:
+            if path == "displayname":
+                group.display_name = str(value or "").strip()[:160]
+            else:
+                group.external_id = str(value or "")[:160]
+        elif path in {"", "members"}:
+            values = value if isinstance(value, list) else ([value] if isinstance(value, dict) else [])
+            user_ids = await scim_group_user_ids(db, tenant.id, values)
+            if op in {"replace", "add"}:
+                if op == "replace":
+                    await db.execute(delete(ScimGroupMember).where(ScimGroupMember.group_id == group.id, ScimGroupMember.tenant_id == tenant.id))
+                existing = set((await db.execute(select(ScimGroupMember.user_id).where(ScimGroupMember.group_id == group.id, ScimGroupMember.tenant_id == tenant.id))).scalars().all())
+                for user_id in user_ids:
+                    if user_id not in existing:
+                        db.add(ScimGroupMember(tenant_id=tenant.id, group_id=group.id, user_id=user_id))
+            elif op == "remove":
+                await db.execute(delete(ScimGroupMember).where(ScimGroupMember.group_id == group.id, ScimGroupMember.user_id.in_(user_ids), ScimGroupMember.tenant_id == tenant.id))
+    db.add(AuditEvent(tenant_id=tenant.id, actor_id=token.created_by, action="scim.group.update", resource_type="scim_group", resource_id=group.id, detail_json={"operations": body.get("Operations", [])}))
+    await db.commit()
+    return await scim_group_payload(db, group, tenant.slug)
+
+
+@app.delete("/scim/v2.0/{tenant_slug}/Groups/{group_id}")
+async def scim_delete_group(tenant_slug: str, group_id: str, authorization: str | None = Header(default=None), db: AsyncSession = Depends(get_admin_db)):
+    tenant, token = await scim_context(tenant_slug, authorization, db)
+    group = await db.scalar(select(ScimGroup).where(ScimGroup.id == group_id, ScimGroup.tenant_id == tenant.id))
+    if not group:
+        raise HTTPException(status_code=404, detail="SCIM Group 不存在")
+    db.add(AuditEvent(tenant_id=tenant.id, actor_id=token.created_by, action="scim.group.delete", resource_type="scim_group", resource_id=group.id, detail_json={}))
+    await db.delete(group)
+    await db.commit()
+    return {"deleted": True, "id": group_id}
 
 
 @app.get("/api/permissions")
@@ -1127,14 +1485,28 @@ async def delete_role(role_id: str, ctx: PermissionAdminContext, db: AsyncSessio
 
 @app.get("/api/tenants")
 async def tenants(ctx: Context, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Membership, Tenant).join(Tenant, Tenant.id == Membership.tenant_id).where(Membership.user_id == ctx.user_id, Tenant.is_active.is_(True)))
+    result = await db.execute(select(Membership, Tenant).join(Tenant, Tenant.id == Membership.tenant_id).where(Membership.user_id == ctx.user_id, Membership.is_active.is_(True), Tenant.is_active.is_(True)))
     return [{"id": tenant.id, "name": tenant.name, "slug": tenant.slug, "role": membership.role} for membership, tenant in result.all()]
+
+
+@app.post("/api/tenants")
+async def create_tenant(body: TenantCreate, ctx: Context, db: AsyncSession = Depends(get_admin_db)):
+    slug = body.slug.strip().lower()
+    if await db.scalar(select(Tenant).where(Tenant.slug == slug)):
+        raise HTTPException(status_code=409, detail="租户标识已存在")
+    tenant = Tenant(name=body.name.strip(), slug=slug, is_active=True)
+    db.add(tenant)
+    await db.flush()
+    db.add(Membership(user_id=ctx.user_id, tenant_id=tenant.id, role="owner", is_active=True))
+    db.add(AuditEvent(tenant_id=tenant.id, actor_id=ctx.user_id, action="tenant.create", resource_type="tenant", resource_id=tenant.id, detail_json={"slug": slug}))
+    await db.commit()
+    return {"id": tenant.id, "name": tenant.name, "slug": tenant.slug, "role": "owner"}
 
 
 @app.get("/api/members")
 async def list_members(ctx: AdminContext, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User, Membership).join(Membership, Membership.user_id == User.id).where(Membership.tenant_id == ctx.tenant_id).order_by(User.email))
-    return [{"user_id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role, "custom_role_id": membership.custom_role_id, "is_active": user.is_active, "created_at": user.created_at} for user, membership in result.all()]
+    return [{"user_id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role, "custom_role_id": membership.custom_role_id, "is_active": membership.is_active and user.is_active, "created_at": user.created_at} for user, membership in result.all()]
 
 
 @app.post("/api/members")
@@ -1145,8 +1517,15 @@ async def create_member(body: MemberCreate, ctx: AdminContext, db: AsyncSession 
         db.add(user)
         await db.flush()
     membership = await db.scalar(select(Membership).where(Membership.user_id == user.id, Membership.tenant_id == ctx.tenant_id))
-    if membership:
+    if membership and membership.is_active:
         raise HTTPException(status_code=409, detail="该用户已经是当前租户成员")
+    if membership:
+        membership.is_active = True
+        membership.role = body.role
+        user.is_active = True
+        await audit(db, ctx, "member.reactivate", "membership", membership.id, {"email": user.email, "role": body.role})
+        await db.commit()
+        return {"user_id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role, "is_active": user.is_active}
     custom_role = None
     membership = Membership(user_id=user.id, tenant_id=ctx.tenant_id, role=body.role, custom_role_id=custom_role)
     db.add(membership)
@@ -1154,6 +1533,51 @@ async def create_member(body: MemberCreate, ctx: AdminContext, db: AsyncSession 
     await audit(db, ctx, "member.create", "membership", membership.id, {"email": user.email, "role": body.role})
     await db.commit()
     return {"user_id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role, "is_active": user.is_active}
+
+
+@app.post("/api/members/invite")
+async def invite_member(body: MemberInviteRequest, ctx: AdminContext, db: AsyncSession = Depends(get_db)):
+    settings = get_settings()
+    is_dev = settings.app_env.lower() in {"development", "dev", "test", "testing"}
+    if not is_dev and not (settings.smtp_host and settings.smtp_from):
+        raise HTTPException(status_code=503, detail="生产环境邀请功能需要配置 SMTP_HOST 和 SMTP_FROM")
+    email = body.email.strip().lower()
+    user = await db.scalar(select(User).where(User.email == email))
+    if user:
+        membership = await db.scalar(select(Membership).where(Membership.user_id == user.id, Membership.tenant_id == ctx.tenant_id))
+        if membership and membership.is_active:
+            raise HTTPException(status_code=409, detail="该用户已经是当前租户成员")
+        if membership:
+            membership.is_active = True
+            membership.role = body.role
+        else:
+            membership = Membership(user_id=user.id, tenant_id=ctx.tenant_id, role=body.role)
+            db.add(membership)
+        user.is_active = True
+        await audit(db, ctx, "member.invite.reactivate", "membership", membership.id, {"email": email, "role": body.role})
+        await db.commit()
+        return {"user_id": user.id, "email": email, "role": membership.role, "invited": False, "existing_user": True}
+    user = User(email=email, display_name=body.display_name, password_hash=hash_password(secrets.token_urlsafe(48)), is_active=True)
+    db.add(user)
+    await db.flush()
+    membership = Membership(user_id=user.id, tenant_id=ctx.tenant_id, role=body.role)
+    db.add(membership)
+    await db.flush()
+    token = await create_password_reset(user.id, ctx.tenant_id, settings.password_reset_ttl_minutes * 60)
+    reset_url = f"{settings.frontend_base_url.rstrip('/')}/reset-password?token={token}"
+    try:
+        if settings.smtp_host and settings.smtp_from:
+            await send_email(email, "加入企业 AI 平台", f"你已被邀请加入企业 AI 平台。请在 {settings.password_reset_ttl_minutes} 分钟内设置密码：\n\n{reset_url}")
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("member_invite_email_failed", extra={"tenant_id": ctx.tenant_id, "email": email})
+        raise HTTPException(status_code=503, detail="邀请邮件发送失败，请稍后重试") from exc
+    await audit(db, ctx, "member.invite", "membership", membership.id, {"email": email, "role": body.role})
+    await db.commit()
+    response = {"user_id": user.id, "email": email, "role": membership.role, "invited": True, "expires_in": settings.password_reset_ttl_minutes * 60}
+    if is_dev and not (settings.smtp_host and settings.smtp_from):
+        response["debug_token"] = token
+    return response
 
 
 @app.patch("/api/members/{user_id}")
@@ -1173,10 +1597,12 @@ async def update_member(user_id: str, body: MemberRoleUpdate, ctx: AdminContext,
             raise HTTPException(status_code=404, detail="自定义角色不存在")
         membership.custom_role_id = custom_role.id
     if body.is_active is not None:
-        user.is_active = body.is_active
-    await audit(db, ctx, "member.update", "membership", membership.id, {"user_id": user_id, "role": body.role, "is_active": user.is_active})
+        membership.is_active = body.is_active
+        if body.is_active:
+            user.is_active = True
+    await audit(db, ctx, "member.update", "membership", membership.id, {"user_id": user_id, "role": body.role, "is_active": membership.is_active and user.is_active})
     await db.commit()
-    return {"user_id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role, "custom_role_id": membership.custom_role_id, "is_active": user.is_active}
+    return {"user_id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role, "custom_role_id": membership.custom_role_id, "is_active": membership.is_active and user.is_active}
 
 
 @app.delete("/api/members/{user_id}")
@@ -1299,14 +1725,23 @@ async def update_application(application_id: str, body: ApplicationUpdate, ctx: 
     if not row:
         raise HTTPException(status_code=404, detail="应用不存在")
     await require_project_access(db, ctx, row.project_id, write=True)
-    for field in ("name", "description", "runtime"):
+    if body.custom_domain is not None or body.tls_secret_name is not None:
+        custom_domain = body.custom_domain if body.custom_domain is not None else row.custom_domain
+        tls_secret_name = body.tls_secret_name if body.tls_secret_name is not None else row.tls_secret_name
+        try:
+            custom_domain, tls_secret_name = validate_application_domain(custom_domain, tls_secret_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        row.custom_domain = custom_domain
+        row.tls_secret_name = tls_secret_name
+    for field in ("name", "description", "runtime", "public_rate_limit_per_minute"):
         value = getattr(body, field)
         if value is not None:
             setattr(row, "runtime_json" if field == "runtime" else field, value)
     row.status = "draft"
     await audit(db, ctx, "application.update", "application", row.id, body.model_dump(exclude_none=True))
     await db.commit()
-    return {"id": row.id, "name": row.name, "description": row.description, "runtime": row.runtime_json, "status": row.status}
+    return {"id": row.id, "name": row.name, "description": row.description, "runtime": row.runtime_json, "status": row.status, "custom_domain": row.custom_domain, "tls_secret_name": row.tls_secret_name, "public_rate_limit_per_minute": row.public_rate_limit_per_minute}
 
 
 @app.post("/api/applications/{application_id}/rollback")
@@ -1436,12 +1871,13 @@ async def create_application_deployment(application_id: str, body: ApplicationDe
     if not version:
         raise HTTPException(status_code=404, detail="应用版本不存在")
     revision = int(await db.scalar(select(func.coalesce(func.max(ApplicationDeployment.revision), 0)).where(ApplicationDeployment.application_id == application.id, ApplicationDeployment.environment == body.environment)) or 0) + 1
-    endpoint_url = f"https://{application.slug}.{get_settings().application_base_domain}" if get_settings().application_base_domain else ""
+    host = application.custom_domain or (f"{application.slug}.{get_settings().application_base_domain}" if get_settings().application_base_domain else "")
+    endpoint_url = f"https://{host}" if host else ""
     row = ApplicationDeployment(tenant_id=ctx.tenant_id, application_id=application.id, build_id=build.id if build else None, version=version.version, revision=revision, environment=body.environment, image=image, replicas=body.replicas, endpoint_url=endpoint_url, created_by=ctx.user_id)
     db.add(row)
     await db.flush()
     try:
-        row.manifest_json = build_application_manifests(row.id, application.slug, image, body.replicas, body.container_port, body.health_path, body.env, body.secret_refs)
+        row.manifest_json = build_application_manifests(row.id, application.slug, image, body.replicas, body.container_port, body.health_path, body.env, body.secret_refs, host=host or None, tls_secret_name=application.tls_secret_name or None)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     await audit(db, ctx, "application.deployment.create", "application_deployment", row.id, {"application_id": application.id, "version": version.version, "revision": revision, "environment": body.environment})
@@ -1484,6 +1920,213 @@ async def stop_application_deployment(deployment_id: str, ctx: EditorContext, db
     return {"id": row.id, "status": row.status}
 
 
+PUBLIC_RESULT_TOKEN_TTL_SECONDS = 3600
+
+
+def create_public_result_token(kind: str, run_id: str, tenant_id: str, application_id: str | None = None) -> str:
+    payload = {
+        'kind': kind,
+        'run_id': run_id,
+        'tenant_id': tenant_id,
+        'exp': int(time.time()) + PUBLIC_RESULT_TOKEN_TTL_SECONDS,
+    }
+    if application_id:
+        payload['application_id'] = application_id
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(',', ':'), sort_keys=True).encode()).decode().rstrip('=')
+    signature = hmac.new(_public_result_secret(), encoded.encode(), hashlib.sha256).hexdigest()
+    return f'{encoded}.{signature}'
+
+
+def public_token_revocation_key(token: str) -> str:
+    return f"ai_platform:public_result:revoked:{hashlib.sha256(token.encode()).hexdigest()}"
+
+
+def _public_result_secret() -> bytes:
+    settings = get_settings()
+    return (settings.publication_signing_secret or settings.app_secret_key).encode()
+
+
+def decode_public_result_token(token: str) -> dict[str, Any]:
+    try:
+        encoded, signature = token.split('.', 1)
+        expected = hmac.new(_public_result_secret(), encoded.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise ValueError('invalid signature')
+        padding = '=' * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode((encoded + padding).encode()).decode())
+        if int(payload.get('exp', 0)) < int(time.time()):
+            raise ValueError('expired token')
+        if payload.get('kind') not in {'workflow', 'sandbox'}:
+            raise ValueError('unsupported result kind')
+        return payload
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=401, detail='Invalid or expired result token') from exc
+
+
+def public_result_payload(row: Any, result_kind: str) -> dict[str, Any]:
+    return {
+        'kind': result_kind,
+        'run_id': row.id,
+        'status': row.status,
+        'output': row.output_json if row.status == 'succeeded' else None,
+        'error': row.error if row.status in {'failed', 'cancelled'} else None,
+        'created_at': row.created_at,
+        'started_at': row.started_at,
+        'finished_at': row.finished_at,
+    }
+
+
+def resolve_public_value(value: Any, input_data: dict[str, Any]) -> Any:
+    if isinstance(value, list):
+        return [resolve_public_value(item, input_data) for item in value]
+    if isinstance(value, dict):
+        return {key: resolve_public_value(item, input_data) for key, item in value.items()}
+    if not isinstance(value, str):
+        return value
+    match = re.fullmatch(r"\{\{\s*input(?:\.([^}]+))?\s*\}\}", value)
+    if match:
+        current: Any = input_data
+        for part in (match.group(1) or "").split("."):
+            if part and isinstance(current, dict):
+                current = current.get(part)
+            elif part:
+                return ""
+        return current
+    return re.sub(r"\{\{\s*input\.([^}]+?)\s*\}\}", lambda item: str(resolve_public_value(item.group(0), input_data)), value)
+
+
+def validate_public_input(schema: dict[str, Any], input_data: dict[str, Any]) -> None:
+    if not schema:
+        return
+    if not isinstance(input_data, dict):
+        raise HTTPException(status_code=422, detail={"code": "invalid_input", "message": "应用输入必须是 JSON 对象"})
+    required = schema.get("required") or []
+    missing = [key for key in required if key not in input_data]
+    if missing:
+        raise HTTPException(status_code=422, detail={"code": "invalid_input", "message": "缺少必填字段", "fields": missing})
+    properties = schema.get("properties") or {}
+    if isinstance(properties, dict):
+        type_checks = {
+            "string": lambda value: isinstance(value, str),
+            "number": lambda value: isinstance(value, (int, float)) and not isinstance(value, bool),
+            "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+            "boolean": lambda value: isinstance(value, bool),
+            "object": lambda value: isinstance(value, dict),
+            "array": lambda value: isinstance(value, list),
+        }
+        invalid = []
+        for key, definition in properties.items():
+            if key not in input_data or not isinstance(definition, dict):
+                continue
+            expected = definition.get("type")
+            check = type_checks.get(expected)
+            if check and not check(input_data[key]):
+                invalid.append(key)
+            if isinstance(input_data[key], str) and definition.get("maxLength") is not None and len(input_data[key]) > int(definition["maxLength"]):
+                invalid.append(key)
+        if invalid:
+            raise HTTPException(status_code=422, detail={"code": "invalid_input", "message": "字段类型或长度不符合应用协议", "fields": sorted(set(invalid))})
+    if schema.get("additionalProperties") is False and isinstance(properties, dict):
+        extra = sorted(set(input_data) - set(properties))
+        if extra:
+            raise HTTPException(status_code=422, detail={"code": "invalid_input", "message": "包含未声明字段", "fields": extra})
+
+
+def public_runtime_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    ui = manifest.get("ui") if isinstance(manifest.get("ui"), dict) else {"pages": manifest.get("pages", []), "components": manifest.get("components", [])}
+    actions = manifest.get("actions") if isinstance(manifest.get("actions"), list) else []
+    safe_actions = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        safe_actions.append({key: value for key, value in action.items() if key not in {"app_key", "secret", "token", "api_key", "headers"}})
+    return {"ui": ui, "input_schema": manifest.get("input_schema") or {}, "actions": safe_actions, "version": manifest.get("runtime_version", 1)}
+
+
+async def record_public_application_access(db: AsyncSession, tenant_id: str, application_id: str, version: int, request: Request, status_code: int, started: float) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    client_ip_hash = hmac.new(_public_result_secret(), client_ip.encode(), hashlib.sha256).hexdigest()
+    db.add(ApplicationAccessLog(tenant_id=tenant_id, application_id=application_id, version=version, request_id=getattr(request.state, "request_id", ""), status_code=status_code, latency_ms=int((time.perf_counter() - started) * 1000), client_ip_hash=client_ip_hash))
+
+
+async def enforce_public_app_rate_limit(tenant_id: str, application_id: str, manifest: dict[str, Any], request: Request, configured_limit: int | None = None) -> None:
+    settings = get_settings()
+    configured = configured_limit if configured_limit is not None else manifest.get("rate_limit_per_minute", settings.public_app_default_rate_limit)
+    try:
+        limit = max(1, min(int(configured), 10000))
+    except (TypeError, ValueError):
+        limit = settings.public_app_default_rate_limit
+    client_ip = request.client.host if request.client else "unknown"
+    redis = Redis.from_url(settings.redis_url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
+    try:
+        bucket = f"ai_platform:public_app:{tenant_id}:{application_id}:{client_ip}"
+        count = await redis.incr(bucket)
+        if count == 1:
+            await redis.expire(bucket, 60)
+        if count > limit:
+            raise HTTPException(status_code=429, detail={"code": "application_rate_limited", "message": "应用调用频率超限", "retry_after": 60})
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("public application rate limiter unavailable", exc_info=True)
+        if not await allow_local(f"public:{tenant_id}:{application_id}:{client_ip}", limit, 60):
+            raise HTTPException(status_code=429, detail={"code": "application_rate_limited", "message": "应用调用频率超限", "retry_after": 60})
+    finally:
+        await redis.aclose()
+
+
+@app.get('/api/v1/public/runs/{result_token}')
+@app.get('/public/runs/{result_token}')
+async def public_run_result(result_token: str, db: AsyncSession = Depends(get_admin_db)):
+    claims = decode_public_result_token(result_token)
+    redis = Redis.from_url(get_settings().redis_url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
+    try:
+        if await redis.exists(public_token_revocation_key(result_token)):
+            raise HTTPException(status_code=410, detail="结果令牌已撤销")
+    finally:
+        await redis.aclose()
+    kind = str(claims['kind'])
+    run_id = str(claims['run_id'])
+    tenant_id = str(claims['tenant_id'])
+    application_id = str(claims.get('application_id') or '')
+    if kind == 'workflow':
+        row = await db.scalar(select(WorkflowRun).where(WorkflowRun.id == run_id, WorkflowRun.tenant_id == tenant_id))
+        if row and application_id:
+            application = await db.scalar(select(Application).where(Application.id == application_id, Application.tenant_id == tenant_id, Application.status == "deployed"))
+            version = await db.scalar(select(ApplicationVersion).where(ApplicationVersion.application_id == application_id, ApplicationVersion.status == "deployed").order_by(ApplicationVersion.version.desc())) if application else None
+            version_manifest = version.manifest_json or {} if version else {}
+            actions = version_manifest.get("actions") if isinstance(version_manifest.get("actions"), list) else []
+            bound_workflow_id = str(version_manifest.get("workflow_id") or next((item.get("workflow_id") for item in actions if isinstance(item, dict) and str(item.get("type") or item.get("kind") or "").lower() in {"workflow", "run_workflow"}), "") or "")
+            if not application or not version or bound_workflow_id != row.workflow_id:
+                row = None
+    else:
+        row = await db.scalar(select(SandboxRun).where(SandboxRun.id == run_id, SandboxRun.tenant_id == tenant_id))
+        if row and application_id and row.application_id != application_id:
+            row = None
+    if not row:
+        raise HTTPException(status_code=404, detail='Public run does not exist')
+    return public_result_payload(row, kind)
+
+
+@app.post("/api/public/result-tokens/revoke")
+async def revoke_public_result_token(body: dict[str, Any], ctx: AdminContext, db: AsyncSession = Depends(get_db)):
+    token = str(body.get("result_token") or "")
+    if not token:
+        raise HTTPException(status_code=422, detail="result_token 不能为空")
+    claims = decode_public_result_token(token)
+    if str(claims.get("tenant_id")) != ctx.tenant_id:
+        raise HTTPException(status_code=403, detail="无权撤销其他租户的结果令牌")
+    ttl = max(1, int(claims.get("exp", 0) - time.time()))
+    redis = Redis.from_url(get_settings().redis_url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
+    try:
+        await redis.setex(public_token_revocation_key(token), ttl, "1")
+    finally:
+        await redis.aclose()
+    await audit(db, ctx, "public.result_token.revoke", "public_result_token", hashlib.sha256(token.encode()).hexdigest()[:80], {"kind": claims.get("kind"), "run_id": claims.get("run_id")})
+    await db.commit()
+    return {"revoked": True}
+
+@app.get("/api/v1/public/apps/{tenant_slug}/{app_slug}")
 @app.get("/public/apps/{tenant_slug}/{app_slug}")
 async def public_application_runtime(tenant_slug: str, app_slug: str, db: AsyncSession = Depends(get_admin_db)):
     tenant = await db.scalar(select(Tenant).where(Tenant.slug == tenant_slug, Tenant.is_active.is_(True)))
@@ -1494,14 +2137,16 @@ async def public_application_runtime(tenant_slug: str, app_slug: str, db: AsyncS
     manifest = version.manifest_json or {}
     if manifest.get("public") is not True:
         raise HTTPException(status_code=404, detail="应用不存在或尚未发布")
-    return {"name": row.name, "slug": row.slug, "type": row.app_type, "version": version.version, "authentication_required": bool(manifest.get("app_key") or manifest.get("app_key_sha256") or (version.source_json or {}).get("public_key"))}
+    return {"name": row.name, "slug": row.slug, "type": row.app_type, "version": version.version, "authentication_required": bool(manifest.get("app_key") or manifest.get("app_key_sha256") or (version.source_json or {}).get("public_key")), "runtime": public_runtime_manifest(manifest)}
 
 
+@app.post("/api/v1/public/apps/{tenant_slug}/{app_slug}/invoke")
 @app.post("/public/apps/{tenant_slug}/{app_slug}/invoke")
 async def invoke_public_application(
     tenant_slug: str,
     app_slug: str,
     body: PublicAppInvokeRequest,
+    request: Request,
     x_app_key: str | None = Header(default=None),
     db: AsyncSession = Depends(get_admin_db),
 ):
@@ -1513,6 +2158,9 @@ async def invoke_public_application(
     manifest = version.manifest_json or {}
     if manifest.get("public") is not True:
         raise HTTPException(status_code=403, detail="应用未开放公开调用")
+    started = time.perf_counter()
+    await enforce_public_app_rate_limit(tenant.id, row.id, manifest, request, row.public_rate_limit_per_minute)
+    validate_public_input(manifest.get("input_schema") or {}, body.input)
     expected_key = str(manifest.get("app_key") or (version.source_json or {}).get("public_key") or "")
     expected_hash = str(manifest.get("app_key_sha256") or "")
     if row.app_type == "full_code" and not (expected_key or expected_hash):
@@ -1520,7 +2168,17 @@ async def invoke_public_application(
     supplied_hash = hashlib.sha256((x_app_key or "").encode()).hexdigest()
     if ((expected_key or expected_hash) and not x_app_key) or (expected_hash and not hmac.compare_digest(expected_hash, supplied_hash)) or (expected_key and not hmac.compare_digest(expected_key, x_app_key or "")):
         raise HTTPException(status_code=401, detail="应用调用密钥无效")
-    workflow_id = str(manifest.get("workflow_id") or "")
+    actions = manifest.get("actions") if isinstance(manifest.get("actions"), list) else []
+    workflow_action = next((item for item in actions if isinstance(item, dict) and str(item.get("type") or item.get("kind") or "").lower() in {"workflow", "run_workflow"}), None)
+    response_action = next((item for item in actions if isinstance(item, dict) and str(item.get("type") or item.get("kind") or "").lower() in {"response", "return"}), None)
+    workflow_id = str(manifest.get("workflow_id") or (workflow_action or {}).get("workflow_id") or "")
+    if not workflow_id and row.app_type == "low_code" and response_action:
+        output = resolve_public_value(response_action.get("output", response_action.get("value", {})), body.input)
+        db.add(AuditEvent(tenant_id=tenant.id, actor_id=None, action="application.invoke", resource_type="application", resource_id=row.id, detail_json={"status": "succeeded", "version": version.version, "mode": "response_action", "request_id": getattr(request.state, "request_id", "")}))
+        await db.commit()
+        await record_public_application_access(db, tenant.id, row.id, version.version, request, 200, started)
+        await db.commit()
+        return {"status": "succeeded", "application": row.slug, "version": version.version, "output": output}
     if not workflow_id:
         if row.app_type == "full_code":
             await enforce_monthly_budget(db, tenant.id)
@@ -1534,22 +2192,49 @@ async def invoke_public_application(
             db.add(sandbox)
             await db.flush()
             sandbox.manifest_json = build_job_manifest(sandbox.id, runtime, source, int(manifest.get("timeout_seconds", 300)), int(manifest.get("cpu_millicores", 500)), int(manifest.get("memory_mb", 512)))
+            db.add(AuditEvent(tenant_id=tenant.id, actor_id=None, action="application.invoke", resource_type="application", resource_id=row.id, detail_json={"status": "queued", "version": version.version, "mode": "sandbox", "request_id": getattr(request.state, "request_id", "")}))
             await db.commit()
             await enqueue_sandbox(sandbox.id)
-            return {"status": "queued", "sandbox_run_id": sandbox.id, "application": row.slug, "version": version.version}
-        return {"status": "accepted", "application": row.slug, "version": version.version, "output": manifest.get("response", {})}
+            await record_public_application_access(db, tenant.id, row.id, version.version, request, 202, started)
+            await db.commit()
+            return {"status": "queued", "sandbox_run_id": sandbox.id, "result_token": create_public_result_token("sandbox", sandbox.id, tenant.id, row.id), "expires_in": PUBLIC_RESULT_TOKEN_TTL_SECONDS, "application": row.slug, "version": version.version}
+        if "response" not in manifest:
+            raise HTTPException(status_code=422, detail="低代码应用必须配置 workflow 动作或 response 动作")
+        output = resolve_public_value(manifest.get("response", {}), body.input)
+        db.add(AuditEvent(tenant_id=tenant.id, actor_id=None, action="application.invoke", resource_type="application", resource_id=row.id, detail_json={"status": "succeeded", "version": version.version, "mode": "response", "request_id": getattr(request.state, "request_id", "")}))
+        await db.commit()
+        await record_public_application_access(db, tenant.id, row.id, version.version, request, 200, started)
+        await db.commit()
+        return {"status": "succeeded", "application": row.slug, "version": version.version, "output": output}
     workflow = await db.scalar(select(Workflow).where(Workflow.id == workflow_id, Workflow.tenant_id == tenant.id, Workflow.status == "published"))
     if not workflow or not workflow.published_version:
         raise HTTPException(status_code=422, detail="应用绑定的工作流尚未发布")
     await enforce_monthly_budget(db, tenant.id)
     project = await db.scalar(select(Project).where(Project.id == workflow.project_id, Project.tenant_id == tenant.id))
     cost_center = f"project:{project.slug}"[:120] if project and project.slug else "application"
-    run = WorkflowRun(tenant_id=tenant.id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=workflow.published_version, cost_center=cost_center, input_json=body.input, trace_id="", created_by=row.created_by)
+    workflow_input = resolve_public_value((workflow_action or {}).get("input", body.input), body.input)
+    if not isinstance(workflow_input, dict):
+        raise HTTPException(status_code=422, detail="workflow 动作的 input 必须解析为 JSON 对象")
+    run = WorkflowRun(tenant_id=tenant.id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=workflow.published_version, cost_center=cost_center, input_json=workflow_input, trace_id="", created_by=row.created_by)
     db.add(run)
     await db.flush()
+    db.add(AuditEvent(tenant_id=tenant.id, actor_id=None, action="application.invoke", resource_type="application", resource_id=row.id, detail_json={"status": "queued", "version": version.version, "mode": "workflow", "workflow_id": workflow.id, "request_id": getattr(request.state, "request_id", "")}))
     await db.commit()
     await enqueue_run(run.id)
-    return {"status": "queued", "run_id": run.id, "application": row.slug, "version": version.version, "workflow_id": workflow.id}
+    await record_public_application_access(db, tenant.id, row.id, version.version, request, 202, started)
+    await db.commit()
+    return {"status": "queued", "run_id": run.id, "result_token": create_public_result_token("workflow", run.id, tenant.id, row.id), "expires_in": PUBLIC_RESULT_TOKEN_TTL_SECONDS, "application": row.slug, "version": version.version, "workflow_id": workflow.id}
+
+
+@app.get("/api/applications/{application_id}/access-logs")
+async def list_application_access_logs(application_id: str, ctx: Context, db: AsyncSession = Depends(get_db), limit: int = 100):
+    application = await db.scalar(select(Application).where(Application.id == application_id, Application.tenant_id == ctx.tenant_id))
+    if not application:
+        raise HTTPException(status_code=404, detail="应用不存在")
+    await require_project_access(db, ctx, application.project_id)
+    limit = max(1, min(limit, 500))
+    rows = (await db.execute(select(ApplicationAccessLog).where(ApplicationAccessLog.application_id == application_id, ApplicationAccessLog.tenant_id == ctx.tenant_id).order_by(desc(ApplicationAccessLog.created_at)).limit(limit))).scalars().all()
+    return [{"id": row.id, "version": row.version, "request_id": row.request_id, "status_code": row.status_code, "latency_ms": row.latency_ms, "created_at": row.created_at} for row in rows]
 
 
 @app.get("/api/compute/quota")
@@ -1648,6 +2333,52 @@ async def finops_summary(ctx: AdminContext, db: AsyncSession = Depends(get_db)):
         "estimated_cost": {"tokens": round(token_cost, 6), "gpu": round(gpu_cost, 6), "cpu": round(cpu_cost, 6), "total": round(token_cost + gpu_cost + cpu_cost, 6)},
         "budget": {"monthly_budget": float(pricing.get("monthly_budget", 0)), "exceeded": bool(pricing.get("monthly_budget", 0) and token_cost + gpu_cost + cpu_cost >= float(pricing.get("monthly_budget", 0)))},
     }
+
+
+@app.post("/api/finops/billing/import")
+async def import_vendor_billing(body: dict[str, Any], ctx: AdminContext, db: AsyncSession = Depends(get_db)):
+    records = body.get("records") if isinstance(body.get("records"), list) else []
+    if not records or len(records) > 1000:
+        raise HTTPException(status_code=422, detail="records 必须包含 1-1000 条账单记录")
+    imported = 0
+    updated = 0
+    for item in records:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=422, detail="账单记录必须是 JSON 对象")
+        provider_name = str(item.get("provider") or item.get("provider_name") or "").strip()[:120]
+        external_id = str(item.get("id") or item.get("external_id") or "").strip()[:180]
+        period = str(item.get("billing_period") or item.get("period") or "").strip()[:40]
+        if not provider_name or not external_id or not period:
+            raise HTTPException(status_code=422, detail="账单记录需要 provider、external_id、billing_period")
+        try:
+            amount = max(0.0, float(item.get("amount", item.get("billed_amount", 0)) or 0))
+            tokens = max(0, int(item.get("tokens", item.get("billed_tokens", 0)) or 0))
+            gpu_seconds = max(0, int(item.get("gpu_seconds", item.get("billed_gpu_seconds", 0)) or 0))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="账单金额和用量必须是数字") from exc
+        row = await db.scalar(select(VendorBillingRecord).where(VendorBillingRecord.tenant_id == ctx.tenant_id, VendorBillingRecord.provider_name == provider_name, VendorBillingRecord.external_id == external_id))
+        if row:
+            updated += 1
+            row.billing_period, row.currency, row.billed_amount = period, str(item.get("currency") or get_settings().finops_currency)[:12], amount
+            row.billed_tokens, row.billed_gpu_seconds, row.source_json = tokens, gpu_seconds, item
+        else:
+            imported += 1
+            db.add(VendorBillingRecord(tenant_id=ctx.tenant_id, provider_name=provider_name, external_id=external_id, billing_period=period, currency=str(item.get("currency") or get_settings().finops_currency)[:12], billed_amount=amount, billed_tokens=tokens, billed_gpu_seconds=gpu_seconds, source_json=item))
+    await audit(db, ctx, "finops.billing.import", "vendor_billing", ctx.tenant_id, {"imported": imported, "updated": updated})
+    await db.commit()
+    return {"imported": imported, "updated": updated, "total": imported + updated}
+
+
+@app.get("/api/finops/billing")
+async def list_vendor_billing(ctx: AdminContext, db: AsyncSession = Depends(get_db), period: str | None = None, provider: str | None = None):
+    conditions = [VendorBillingRecord.tenant_id == ctx.tenant_id]
+    if period:
+        conditions.append(VendorBillingRecord.billing_period == period[:40])
+    if provider:
+        conditions.append(VendorBillingRecord.provider_name == provider[:120])
+    rows = (await db.execute(select(VendorBillingRecord).where(*conditions).order_by(desc(VendorBillingRecord.billing_period), VendorBillingRecord.provider_name).limit(5000))).scalars().all()
+    total = sum(float(row.billed_amount or 0) for row in rows)
+    return {"currency": rows[0].currency if rows else get_settings().finops_currency, "total_billed": round(total, 6), "records": [{"id": row.id, "provider": row.provider_name, "external_id": row.external_id, "billing_period": row.billing_period, "currency": row.currency, "amount": row.billed_amount, "tokens": row.billed_tokens, "gpu_seconds": row.billed_gpu_seconds, "imported_at": row.imported_at} for row in rows]}
 
 
 @app.put("/api/finops/budget")
@@ -1919,6 +2650,8 @@ async def delete_agent(agent_id: str, ctx: EditorContext, db: AsyncSession = Dep
     if not agent:
         raise HTTPException(status_code=404, detail="Agent 不存在")
     await require_project_access(db, ctx, agent.project_id, write=True)
+    await db.execute(delete(AgentConversation).where(AgentConversation.agent_id == agent.id, AgentConversation.tenant_id == ctx.tenant_id))
+    await db.execute(delete(AgentMemory).where(AgentMemory.agent_id == agent.id, AgentMemory.tenant_id == ctx.tenant_id))
     await db.execute(delete(AgentEvent).where(AgentEvent.agent_id == agent.id, AgentEvent.tenant_id == ctx.tenant_id))
     await db.execute(delete(AgentVersion).where(AgentVersion.agent_id == agent.id, AgentVersion.tenant_id == ctx.tenant_id))
     await db.execute(delete(AgentConfig).where(AgentConfig.agent_id == agent.id, AgentConfig.tenant_id == ctx.tenant_id))
@@ -1926,6 +2659,133 @@ async def delete_agent(agent_id: str, ctx: EditorContext, db: AsyncSession = Dep
     await db.delete(agent)
     await db.commit()
     return {"id": agent_id, "deleted": True}
+
+
+async def load_agent_conversation(db: AsyncSession, ctx: OperatorContext, agent_id: str, conversation_id: str | None) -> AgentConversation | None:
+    if not conversation_id:
+        return None
+    conversation = await db.scalar(select(AgentConversation).where(
+        AgentConversation.id == conversation_id,
+        AgentConversation.tenant_id == ctx.tenant_id,
+        AgentConversation.agent_id == agent_id,
+        AgentConversation.user_id == ctx.user_id,
+    ))
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Agent 会话不存在或无权访问")
+    return conversation
+
+
+def persist_agent_messages(conversation: AgentConversation, history: list[dict[str, Any]], user_message: str, assistant_text: str) -> None:
+    retained = [item for item in history if item.get("role") in {"user", "assistant"} and isinstance(item.get("content"), str)]
+    conversation.messages_json = [
+        *retained,
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": assistant_text},
+    ][-100:]
+    conversation.updated_at = utcnow()
+
+
+async def load_agent_memories(db: AsyncSession, ctx: OperatorContext, agent_id: str, config: AgentConfig | None) -> list[AgentMemory]:
+    memory_config = (config.memory_json if config else {}) or {}
+    if memory_config.get("enabled", True) is False:
+        return []
+    return list((await db.execute(select(AgentMemory).where(
+        AgentMemory.agent_id == agent_id,
+        AgentMemory.tenant_id == ctx.tenant_id,
+        AgentMemory.user_id == ctx.user_id,
+        or_(AgentMemory.expires_at.is_(None), AgentMemory.expires_at > utcnow()),
+    ).order_by(desc(AgentMemory.created_at)).limit(20))).scalars().all())
+
+
+@app.get("/api/agents/{agent_id}/memories")
+async def list_agent_memories(agent_id: str, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
+    agent = await db.scalar(select(Agent).where(Agent.id == agent_id, Agent.tenant_id == ctx.tenant_id))
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent 不存在")
+    await require_project_access(db, ctx, agent.project_id)
+    rows = list((await db.execute(select(AgentMemory).where(
+        AgentMemory.agent_id == agent_id,
+        AgentMemory.tenant_id == ctx.tenant_id,
+        AgentMemory.user_id == ctx.user_id,
+        or_(AgentMemory.expires_at.is_(None), AgentMemory.expires_at > utcnow()),
+    ).order_by(desc(AgentMemory.created_at)).limit(100))).scalars().all())
+    return [{"id": row.id, "memory_key": row.memory_key, "content": row.content, "expires_at": row.expires_at, "created_at": row.created_at} for row in rows]
+
+
+@app.post("/api/agents/{agent_id}/memories")
+async def create_agent_memory(agent_id: str, body: AgentMemoryCreate, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
+    agent = await db.scalar(select(Agent).where(Agent.id == agent_id, Agent.tenant_id == ctx.tenant_id))
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent 不存在")
+    await require_project_access(db, ctx, agent.project_id, write=True)
+    config = await get_or_create_agent_config(db, ctx, agent)
+    retention_days = body.retention_days
+    if retention_days is None:
+        configured = (config.memory_json or {}).get("retention_days")
+        try:
+            retention_days = int(configured) if configured else None
+        except (TypeError, ValueError):
+            retention_days = None
+    if retention_days is not None:
+        retention_days = max(1, min(retention_days, 3650))
+    expires_at = utcnow() + timedelta(days=retention_days) if retention_days else None
+    row = AgentMemory(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, memory_key=body.memory_key.strip(), content=body.content.strip(), expires_at=expires_at)
+    db.add(row)
+    await audit(db, ctx, "agent.memory.create", "agent_memory", row.id, {"agent_id": agent.id, "memory_key": row.memory_key, "expires_at": expires_at})
+    await db.commit()
+    return {"id": row.id, "agent_id": agent.id, "memory_key": row.memory_key, "content": row.content, "expires_at": row.expires_at}
+
+
+@app.delete("/api/agents/{agent_id}/memories/{memory_id}")
+async def delete_agent_memory(agent_id: str, memory_id: str, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
+    agent = await db.scalar(select(Agent).where(Agent.id == agent_id, Agent.tenant_id == ctx.tenant_id))
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent 不存在")
+    await require_project_access(db, ctx, agent.project_id, write=True)
+    row = await db.scalar(select(AgentMemory).where(AgentMemory.id == memory_id, AgentMemory.agent_id == agent_id, AgentMemory.tenant_id == ctx.tenant_id, AgentMemory.user_id == ctx.user_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="Agent 记忆不存在或无权访问")
+    await db.delete(row)
+    await audit(db, ctx, "agent.memory.delete", "agent_memory", memory_id, {"agent_id": agent.id})
+    await db.commit()
+    return {"id": memory_id, "deleted": True}
+
+
+@app.get("/api/agents/{agent_id}/conversations")
+async def list_agent_conversations(agent_id: str, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
+    agent = await db.scalar(select(Agent).where(Agent.id == agent_id, Agent.tenant_id == ctx.tenant_id))
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent 不存在")
+    await require_project_access(db, ctx, agent.project_id)
+    rows = (await db.execute(select(AgentConversation).where(
+        AgentConversation.agent_id == agent_id,
+        AgentConversation.tenant_id == ctx.tenant_id,
+        AgentConversation.user_id == ctx.user_id,
+    ).order_by(desc(AgentConversation.updated_at)).limit(100))).scalars().all()
+    return [{"id": row.id, "agent_id": row.agent_id, "title": row.title, "message_count": len(row.messages_json or []), "created_at": row.created_at, "updated_at": row.updated_at} for row in rows]
+
+
+@app.get("/api/agents/{agent_id}/conversations/{conversation_id}")
+async def get_agent_conversation(agent_id: str, conversation_id: str, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
+    agent = await db.scalar(select(Agent).where(Agent.id == agent_id, Agent.tenant_id == ctx.tenant_id))
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent 不存在")
+    await require_project_access(db, ctx, agent.project_id)
+    row = await load_agent_conversation(db, ctx, agent_id, conversation_id)
+    return {"id": row.id, "agent_id": row.agent_id, "title": row.title, "messages": row.messages_json or [], "created_at": row.created_at, "updated_at": row.updated_at}
+
+
+@app.delete("/api/agents/{agent_id}/conversations/{conversation_id}")
+async def delete_agent_conversation(agent_id: str, conversation_id: str, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
+    agent = await db.scalar(select(Agent).where(Agent.id == agent_id, Agent.tenant_id == ctx.tenant_id))
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent 不存在")
+    await require_project_access(db, ctx, agent.project_id, write=True)
+    row = await load_agent_conversation(db, ctx, agent_id, conversation_id)
+    await db.delete(row)
+    await audit(db, ctx, "agent.conversation.delete", "agent_conversation", conversation_id, {"agent_id": agent_id})
+    await db.commit()
+    return {"id": conversation_id, "deleted": True}
 
 
 @app.post("/api/agents/{agent_id}/chat")
@@ -1958,19 +2818,98 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
         raise HTTPException(status_code=422, detail={"message": "输入未通过安全策略", "reasons": safety["reasons"]})
     user_message = safety["text"] if policy.safety_json.get("mode") == "redact" else body.message
     system = agent.system_prompt + (f"\n\nEnterprise knowledge context:\n{context_text}" if context_text else "")
-    messages = [{"role": "system", "content": system}, *body.conversation[-20:], {"role": "user", "content": user_message}]
+    conversation = await load_agent_conversation(db, ctx, agent.id, body.conversation_id)
+    history = (conversation.messages_json if conversation else body.conversation)[-20:]
+    messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
     started = time.perf_counter()
-    result = await call_routed_chat(db, messages, tenant_id=ctx.tenant_id, preferred_provider_id=agent.provider_id)
+    config = await get_or_create_agent_config(db, ctx, agent)
+    memories = await load_agent_memories(db, ctx, agent.id, config)
+    if memories:
+        messages[0]["content"] += "\n\nLong-term user memory:\n" + "\n".join(f"- {item.content}" for item in memories)
+    result = await run_agent_loop(db, messages, tenant_id=ctx.tenant_id, actor_id=ctx.user_id, config=config, preferred_provider_id=agent.provider_id)
     usage = result.get("usage") or {}
     total_tokens = int(usage.get("total_tokens", 0))
     cost_center = await resolve_cost_center(db, ctx.tenant_id, agent.project_id, body.cost_center, "agent")
     db.add(ComputeUsage(tenant_id=ctx.tenant_id, cost_center=cost_center, tokens=total_tokens))
-    event = AgentEvent(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, event_type="message", tokens=total_tokens, latency_ms=int((time.perf_counter() - started) * 1000), detail_json={"provider_id": result["provider_id"], "model": result["model"]})
+    event = AgentEvent(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, event_type="message", tokens=total_tokens, latency_ms=int((time.perf_counter() - started) * 1000), detail_json={"provider_id": result["provider_id"], "model": result["model"], "tool_trace": result.get("tool_trace", []), "tool_rounds": result.get("tool_rounds", 0)})
     db.add(event)
-    await audit(db, ctx, "agent.chat", "agent", agent.id, {"provider_id": result["provider_id"], "usage": result.get("usage", {})})
+    if not conversation:
+        conversation = AgentConversation(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, title=user_message[:160])
+        db.add(conversation)
+    persist_agent_messages(conversation, history, user_message, result["text"])
+    await audit(db, ctx, "agent.chat", "agent", agent.id, {"provider_id": result["provider_id"], "usage": result.get("usage", {}), "tool_rounds": result.get("tool_rounds", 0)})
     await db.commit()
     await db.flush()
-    return {"agent_id": agent.id, "event_id": event.id, "text": result["text"], "usage": result.get("usage", {})}
+    return {"agent_id": agent.id, "event_id": event.id, "conversation_id": conversation.id, "text": result["text"], "usage": result.get("usage", {}), "tool_trace": result.get("tool_trace", []), "tool_rounds": result.get("tool_rounds", 0)}
+
+
+@app.post("/api/agents/{agent_id}/chat/stream")
+async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
+    """Stream Agent text/tool events as SSE and persist usage after completion."""
+    agent = await db.scalar(select(Agent).where(Agent.id == agent_id, Agent.tenant_id == ctx.tenant_id, Agent.enabled.is_(True)))
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent 不存在或已禁用")
+    await require_project_access(db, ctx, agent.project_id)
+    provider = await db.scalar(select(ModelProvider).where(ModelProvider.id == agent.provider_id, ModelProvider.tenant_id == ctx.tenant_id, ModelProvider.enabled.is_(True))) if agent.provider_id else await db.scalar(select(ModelProvider).where(ModelProvider.tenant_id == ctx.tenant_id, ModelProvider.enabled.is_(True)))
+    if not provider:
+        raise HTTPException(status_code=422, detail="Agent 没有绑定可用模型提供商")
+    await enforce_monthly_budget(db, ctx.tenant_id)
+    context_text = ""
+    if agent.knowledge_base_id:
+        rows = await search_chunks(db, ctx.tenant_id, agent.knowledge_base_id, body.message, 5)
+        context_text = "\n\n".join(row["content"] for row in rows)
+    policy = await tenant_policy(db, ctx.tenant_id)
+    safety = inspect_text(body.message, policy.safety_json)
+    if safety["blocked"]:
+        await audit(db, ctx, "safety.block", "agent", agent.id, {"reasons": safety["reasons"]})
+        await db.commit()
+        raise HTTPException(status_code=422, detail={"message": "输入未通过安全策略", "reasons": safety["reasons"]})
+    user_message = safety["text"] if policy.safety_json.get("mode") == "redact" else body.message
+    system = agent.system_prompt + (f"\n\nEnterprise knowledge context:\n{context_text}" if context_text else "")
+    conversation = await load_agent_conversation(db, ctx, agent.id, body.conversation_id)
+    history = (conversation.messages_json if conversation else body.conversation)[-20:]
+    messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
+    config = await get_or_create_agent_config(db, ctx, agent)
+    memories = await load_agent_memories(db, ctx, agent.id, config)
+    if memories:
+        messages[0]["content"] += "\n\nLong-term user memory:\n" + "\n".join(f"- {item.content}" for item in memories)
+    started = time.perf_counter()
+
+    def sse(event: str, payload: dict[str, Any]) -> str:
+        return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+
+    async def event_stream():
+        nonlocal conversation
+        try:
+            async for item in stream_agent_loop(db, messages, tenant_id=ctx.tenant_id, actor_id=ctx.user_id, config=config, preferred_provider_id=agent.provider_id):
+                kind = item.get("type")
+                if kind == "token":
+                    yield sse("token", {"text": item["text"]})
+                elif kind in {"tool_call", "tool_result"}:
+                    yield sse(kind, {key: value for key, value in item.items() if key != "type"})
+                elif kind == "final":
+                    usage = item.get("usage") or {}
+                    total_tokens = int(usage.get("total_tokens", 0))
+                    cost_center = await resolve_cost_center(db, ctx.tenant_id, agent.project_id, body.cost_center, "agent")
+                    db.add(ComputeUsage(tenant_id=ctx.tenant_id, cost_center=cost_center, tokens=total_tokens))
+                    event = AgentEvent(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, event_type="message", tokens=total_tokens, latency_ms=int((time.perf_counter() - started) * 1000), detail_json={"provider_id": item.get("provider_id"), "model": item.get("model"), "tool_trace": item.get("tool_trace", []), "tool_rounds": item.get("tool_rounds", 0), "stream": True})
+                    db.add(event)
+                    if not conversation:
+                        conversation = AgentConversation(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, title=user_message[:160])
+                        db.add(conversation)
+                    persist_agent_messages(conversation, history, user_message, item.get("text", ""))
+                    await audit(db, ctx, "agent.chat.stream", "agent", agent.id, {"usage": usage, "tool_rounds": item.get("tool_rounds", 0)})
+                    await db.commit()
+                    await db.flush()
+                    yield sse("done", {"agent_id": agent.id, "event_id": event.id, "conversation_id": conversation.id, "text": item.get("text", ""), "usage": usage, "tool_trace": item.get("tool_trace", [])})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("agent stream failed: %s", exc)
+            await db.rollback()
+            yield sse("error", {"message": str(exc)[:1000]})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/v1/agents/{agent_id}/chat")
@@ -1978,6 +2917,13 @@ async def public_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
     """API Key/JWT 对外 Agent 调用入口，复用内部租户和安全策略。"""
     require_api_scope(ctx, "agent:invoke")
     return await chat_agent(agent_id, body, ctx, db)
+
+
+@app.post("/api/v1/agents/{agent_id}/chat/stream")
+async def public_stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext, db: AsyncSession = Depends(get_db)):
+    """Public API-key scoped SSE endpoint for Agent streaming."""
+    require_api_scope(ctx, "agent:invoke")
+    return await stream_chat_agent(agent_id, body, ctx, db)
 
 
 @app.post("/api/agents/{agent_id}/events/{event_id}/feedback")
@@ -2018,6 +2964,7 @@ async def run_evaluation(body: EvaluationRequest, ctx: AdminContext, db: AsyncSe
     policy = await tenant_policy(db, ctx.tenant_id)
     results: list[dict[str, Any]] = []
     total_tokens = 0
+    judge_tokens = 0
     for case in body.cases:
         safety = inspect_text(case.message, policy.safety_json)
         if safety["blocked"]:
@@ -2028,12 +2975,21 @@ async def run_evaluation(body: EvaluationRequest, ctx: AdminContext, db: AsyncSe
         usage = response.get("usage") or {}
         total_tokens += int(usage.get("total_tokens", 0))
         missing = [expected for expected in case.expected_contains if expected.lower() not in answer.lower()]
-        results.append({"message": case.message, "answer": answer, "passed": not missing, "score": 1 if not missing else 0, "missing": missing, "usage": usage})
-    db.add(ComputeUsage(tenant_id=ctx.tenant_id, cost_center="evaluation", tokens=total_tokens))
+        item = {"message": case.message, "answer": answer, "passed": not missing, "score": 1 if not missing else 0, "missing": missing, "usage": usage}
+        if body.judge_enabled:
+            judge = await judge_answer(db, tenant_id=ctx.tenant_id, answer=answer, expected_contains=case.expected_contains, provider_id=body.judge_provider_id)
+            item["judge"] = judge
+            item["passed"] = bool(item["passed"] and judge["passed"])
+            item["score"] = round((float(item["score"]) + float(judge["score"])) / 2, 4)
+            judge_tokens += int((judge.get("usage") or {}).get("total_tokens", 0))
+        results.append(item)
+    db.add(ComputeUsage(tenant_id=ctx.tenant_id, cost_center="evaluation", tokens=total_tokens + judge_tokens))
     passed = sum(1 for item in results if item["passed"])
-    await audit(db, ctx, "evaluation.run", "agent", agent.id, {"cases": len(results), "passed": passed, "tokens": total_tokens})
+    score = round(passed / len(results), 4) if results else 0
+    gate_passed = not body.regression_threshold or score >= body.regression_threshold
+    await audit(db, ctx, "evaluation.run", "agent", agent.id, {"cases": len(results), "passed": passed, "tokens": total_tokens + judge_tokens, "dataset_version": body.dataset_version, "judge_enabled": body.judge_enabled, "regression_gate": "passed" if gate_passed else "failed"})
     await db.commit()
-    return {"agent_id": agent.id, "total": len(results), "passed": passed, "score": round(passed / len(results), 4) if results else 0, "results": results}
+    return {"agent_id": agent.id, "dataset_version": body.dataset_version, "total": len(results), "passed": passed, "score": score, "regression_gate": "passed" if gate_passed else "failed", "results": results}
 
 
 @app.post("/api/evaluations/jobs")
@@ -2427,7 +3383,7 @@ async def list_workflow_schedules(workflow_id: str, ctx: Context, db: AsyncSessi
         raise HTTPException(status_code=404, detail="工作流不存在")
     await require_project_access(db, ctx, workflow.project_id)
     rows = (await db.execute(select(WorkflowSchedule).where(WorkflowSchedule.workflow_id == workflow_id, WorkflowSchedule.tenant_id == ctx.tenant_id).order_by(WorkflowSchedule.created_at.desc()))).scalars().all()
-    return [{"id": row.id, "workflow_id": row.workflow_id, "environment": row.environment, "interval_seconds": row.interval_seconds, "next_run_at": row.next_run_at, "last_run_at": row.last_run_at, "input": row.input_json, "active": row.active} for row in rows]
+    return [{"id": row.id, "workflow_id": row.workflow_id, "environment": row.environment, "interval_seconds": row.interval_seconds, "cron_expression": row.cron_expression, "timezone": row.timezone, "misfire_policy": row.misfire_policy, "next_run_at": row.next_run_at, "last_run_at": row.last_run_at, "input": row.input_json, "active": row.active} for row in rows]
 
 
 @app.post("/api/workflows/{workflow_id}/schedules")
@@ -2436,11 +3392,18 @@ async def create_workflow_schedule(workflow_id: str, body: ScheduleCreate, ctx: 
     if not workflow:
         raise HTTPException(status_code=404, detail="工作流不存在")
     await require_project_access(db, ctx, workflow.project_id, write=True)
-    row = WorkflowSchedule(tenant_id=ctx.tenant_id, workflow_id=workflow_id, environment=body.environment, interval_seconds=body.interval_seconds, next_run_at=utcnow() + timedelta(seconds=body.interval_seconds), input_json=body.input, active=body.active, created_by=ctx.user_id)
+    if bool(body.interval_seconds) == bool(body.cron_expression):
+        raise HTTPException(status_code=422, detail="请配置 interval_seconds 或 cron_expression 其中一个")
+    current = utcnow()
+    try:
+        next_run_at = next_schedule_time(body.cron_expression or "", body.timezone, body.interval_seconds, current)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    row = WorkflowSchedule(tenant_id=ctx.tenant_id, workflow_id=workflow_id, environment=body.environment, interval_seconds=body.interval_seconds, cron_expression=body.cron_expression or "", timezone=body.timezone, misfire_policy=body.misfire_policy, next_run_at=next_run_at, input_json=body.input, active=body.active, created_by=ctx.user_id)
     db.add(row)
-    await audit(db, ctx, "workflow.schedule.create", "workflow_schedule", row.id, {"interval_seconds": row.interval_seconds})
+    await audit(db, ctx, "workflow.schedule.create", "workflow_schedule", row.id, {"interval_seconds": row.interval_seconds, "cron_expression": row.cron_expression, "timezone": row.timezone, "misfire_policy": row.misfire_policy})
     await db.commit()
-    return {"id": row.id, "workflow_id": row.workflow_id, "interval_seconds": row.interval_seconds, "next_run_at": row.next_run_at, "active": row.active}
+    return {"id": row.id, "workflow_id": row.workflow_id, "interval_seconds": row.interval_seconds, "cron_expression": row.cron_expression, "timezone": row.timezone, "misfire_policy": row.misfire_policy, "next_run_at": row.next_run_at, "active": row.active}
 
 
 @app.patch("/api/workflow-schedules/{schedule_id}")
@@ -2452,15 +3415,31 @@ async def update_workflow_schedule(schedule_id: str, body: ScheduleUpdate, ctx: 
     if not workflow:
         raise HTTPException(status_code=404, detail="工作流不存在")
     await require_project_access(db, ctx, workflow.project_id, write=True)
+    schedule_changed = any(value is not None for value in (body.interval_seconds, body.cron_expression, body.timezone, body.misfire_policy))
     if body.interval_seconds is not None:
         row.interval_seconds = body.interval_seconds
-        row.next_run_at = utcnow() + timedelta(seconds=body.interval_seconds)
+        row.cron_expression = ""
+    if body.cron_expression is not None:
+        row.cron_expression = body.cron_expression
+        row.interval_seconds = None
+    if body.timezone is not None:
+        row.timezone = body.timezone
+    if body.misfire_policy is not None:
+        row.misfire_policy = body.misfire_policy
+    if schedule_changed:
+        if bool(row.interval_seconds) == bool(row.cron_expression):
+            raise HTTPException(status_code=422, detail="请配置 interval_seconds 或 cron_expression 其中一个")
+        try:
+            row.next_run_at = next_schedule_time(row.cron_expression, row.timezone, row.interval_seconds, utcnow())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     if body.active is not None:
         row.active = body.active
     if body.input is not None:
         row.input_json = body.input
+    await audit(db, ctx, "workflow.schedule.update", "workflow_schedule", row.id, {"interval_seconds": row.interval_seconds, "cron_expression": row.cron_expression, "timezone": row.timezone, "misfire_policy": row.misfire_policy, "active": row.active})
     await db.commit()
-    return {"id": row.id, "interval_seconds": row.interval_seconds, "next_run_at": row.next_run_at, "active": row.active, "input": row.input_json}
+    return {"id": row.id, "interval_seconds": row.interval_seconds, "cron_expression": row.cron_expression, "timezone": row.timezone, "misfire_policy": row.misfire_policy, "next_run_at": row.next_run_at, "active": row.active, "input": row.input_json}
 
 
 @app.delete("/api/workflow-schedules/{schedule_id}")
@@ -2686,6 +3665,12 @@ async def upload_document(kb_id: str, ctx: EditorContext, file: UploadFile = Fil
         inspection = await inspect_upload(file.filename or "uploaded-document", raw, content)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    storage_key = object_key(ctx.tenant_id, document_checksum, file.filename or "uploaded-document")
+    try:
+        storage_backend = await put_bytes(storage_key, raw, file.content_type or content_type_for(file.filename or "uploaded-document"))
+    except Exception as exc:
+        logger.exception("document artifact storage failed")
+        raise HTTPException(status_code=503, detail=f"原始文件存储失败: {type(exc).__name__}") from exc
     document = Document(
         tenant_id=ctx.tenant_id,
         kb_id=kb.id,
@@ -2699,6 +3684,8 @@ async def upload_document(kb_id: str, ctx: EditorContext, file: UploadFile = Fil
         extraction_method=extraction_method,
         security_status=inspection.status,
         security_report_json=inspection.payload(),
+        storage_key=storage_key,
+        storage_backend=storage_backend,
         created_by=ctx.user_id,
     )
     db.add(document)
@@ -2712,14 +3699,45 @@ async def upload_document(kb_id: str, ctx: EditorContext, file: UploadFile = Fil
     await audit(db, ctx, "knowledge.document.upload", "document", document.id, {"kb_id": kb.id, "filename": file.filename, "extraction_method": extraction_method, "security_status": inspection.status})
     await db.commit()
     await enqueue_index(document.id)
-    return {"id": document.id, "kb_id": kb.id, "title": document.title, "status": document.status, "checksum": document.checksum, "extraction_method": extraction_method, "security_status": inspection.status, "security_report": inspection.payload(), "vector_indexed": 0, "index_queued": True}
+    return {"id": document.id, "kb_id": kb.id, "title": document.title, "status": document.status, "checksum": document.checksum, "extraction_method": extraction_method, "security_status": inspection.status, "security_report": inspection.payload(), "storage_backend": storage_backend, "vector_indexed": 0, "index_queued": True}
 
 
 @app.get("/api/knowledge-bases/{kb_id}/documents")
 async def list_documents(kb_id: str, ctx: Context, db: AsyncSession = Depends(get_db)):
     await require_kb_access(kb_id, ctx, db)
     rows = (await db.execute(select(Document).where(Document.kb_id == kb_id, Document.tenant_id == ctx.tenant_id).order_by(Document.created_at.desc()))).scalars().all()
-    return [{"id": row.id, "kb_id": row.kb_id, "title": row.title, "source": row.source, "checksum": row.checksum, "status": row.status, "mime_type": row.mime_type, "file_size": row.file_size, "extraction_method": row.extraction_method, "security_status": row.security_status, "security_report": row.security_report_json, "created_at": row.created_at} for row in rows]
+    return [{"id": row.id, "kb_id": row.kb_id, "title": row.title, "source": row.source, "checksum": row.checksum, "status": row.status, "mime_type": row.mime_type, "file_size": row.file_size, "extraction_method": row.extraction_method, "security_status": row.security_status, "security_report": row.security_report_json, "storage_backend": row.storage_backend, "created_at": row.created_at} for row in rows]
+
+
+@app.get("/api/documents/{document_id}/download-url")
+async def document_download_url(document_id: str, ctx: Context, db: AsyncSession = Depends(get_db)):
+    document = await db.scalar(select(Document).where(Document.id == document_id, Document.tenant_id == ctx.tenant_id))
+    if not document or not document.storage_key:
+        raise HTTPException(status_code=404, detail="文件对象不存在")
+    await require_kb_access(document.kb_id, ctx, db)
+    try:
+        url = await presign_get(document.storage_key, document.title, document.mime_type)
+        if url:
+            return {"backend": document.storage_backend, "url": url, "expires_in": max(60, min(get_settings().s3_presign_expire_seconds, 86400))}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"文件下载地址生成失败: {type(exc).__name__}") from exc
+    return {"backend": document.storage_backend, "url": f"/api/documents/{document.id}/content", "expires_in": 300}
+
+
+@app.get("/api/documents/{document_id}/content")
+async def document_content(document_id: str, ctx: Context, db: AsyncSession = Depends(get_db)):
+    document = await db.scalar(select(Document).where(Document.id == document_id, Document.tenant_id == ctx.tenant_id))
+    if not document or not document.storage_key:
+        raise HTTPException(status_code=404, detail="文件对象不存在")
+    await require_kb_access(document.kb_id, ctx, db)
+    try:
+        content = await get_bytes(document.storage_key)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="文件对象不存在") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"文件读取失败: {type(exc).__name__}") from exc
+    safe_filename = Path(document.title).name.replace('"', "_")[:180]
+    return Response(content=content, media_type=document.mime_type or content_type_for(document.title), headers={"Content-Disposition": f'attachment; filename="{safe_filename}"'})
 
 
 @app.post("/api/documents/{document_id}/reindex")
@@ -2740,10 +3758,15 @@ async def delete_document(document_id: str, ctx: EditorContext, db: AsyncSession
     if not document:
         raise HTTPException(status_code=404, detail="文档不存在")
     await require_kb_access(document.kb_id, ctx, db, write=True)
+    storage_key = document.storage_key
     await db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document.id, DocumentChunk.tenant_id == ctx.tenant_id))
     await db.delete(document)
     await audit(db, ctx, "knowledge.document.delete", "document", document_id)
     await db.commit()
+    try:
+        await delete_object(storage_key)
+    except Exception:
+        logger.warning("failed to remove document artifact", exc_info=True)
     try:
         from .services.vector import delete_document_vectors
         await delete_document_vectors(ctx.tenant_id, document.kb_id, document_id)
@@ -3006,7 +4029,7 @@ async def test_mcp_server(server_id: str, ctx: AdminContext, db: AsyncSession = 
 @app.get("/api/audit")
 async def list_audit(ctx: AdminContext, db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(AuditEvent).where(AuditEvent.tenant_id == ctx.tenant_id).order_by(desc(AuditEvent.created_at)).limit(200))).scalars().all()
-    return [{"id": row.id, "action": row.action, "resource_type": row.resource_type, "resource_id": row.resource_id, "actor_id": row.actor_id, "detail": row.detail_json, "created_at": row.created_at} for row in rows]
+    return [{"id": row.id, "action": row.action, "resource_type": row.resource_type, "resource_id": row.resource_id, "actor_id": row.actor_id, "detail": row.detail_json, "prev_hash": row.prev_hash, "event_hash": row.event_hash, "created_at": row.created_at} for row in rows]
 
 
 @app.get("/api/audit/export", response_class=PlainTextResponse)
@@ -3017,6 +4040,33 @@ async def export_audit(ctx: AdminContext, db: AsyncSession = Depends(get_db)):
         values = [row.id, row.action, row.resource_type, row.resource_id, row.actor_id or "", row.created_at.isoformat(), json.dumps(row.detail_json or {}, ensure_ascii=False)]
         lines.append(",".join('"' + str(value).replace('"', '""') + '"' for value in values))
     return PlainTextResponse("\n".join(lines), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=audit-events.csv"})
+
+
+@app.get("/api/audit/verify")
+async def verify_audit_chain(ctx: AdminContext, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(text("""
+        WITH hashed AS (
+          SELECT id, prev_hash, event_hash,
+                 LAG(event_hash) OVER (ORDER BY created_at, id) AS expected_prev,
+                 encode(digest(
+                   COALESCE(prev_hash, '') || '|' || id || '|' || tenant_id || '|' ||
+                   COALESCE(actor_id, '') || '|' || COALESCE(action, '') || '|' ||
+                   COALESCE(resource_type, '') || '|' || COALESCE(resource_id, '') || '|' ||
+                   COALESCE(created_at::text, '') || '|' || COALESCE(detail_json::text, '{}'),
+                   'sha256'
+                 ), 'hex') AS expected_hash
+          FROM audit_events
+          WHERE tenant_id = :tenant_id AND event_hash <> ''
+          ORDER BY created_at, id
+        )
+        SELECT id, prev_hash, event_hash, expected_prev, expected_hash
+        FROM hashed
+        WHERE (expected_prev IS NOT NULL AND prev_hash <> expected_prev)
+           OR event_hash <> expected_hash
+        LIMIT 100
+    """), {"tenant_id": ctx.tenant_id})
+    invalid = [dict(row) for row in result.mappings().all()]
+    return {"tenant_id": ctx.tenant_id, "verified": not invalid, "checked": "hash_chain", "invalid_events": invalid}
 
 
 @app.get("/api/observability/summary")
@@ -3454,18 +4504,33 @@ async def list_databases(ctx: Context, db: AsyncSession = Depends(get_db)):
     return [{"id": row.id, "name": row.name, "db_type": row.db_type, "host": row.host, "port": row.port, "database_name": row.database_name, "username": row.username, "status": row.status, "schema": row.schema_json, "workspace_id": row.workspace_id, "created_at": row.created_at} for row in rows]
 
 
+def validate_database_host(host: str) -> str:
+    normalized = host.strip().lower().rstrip(".")
+    if not normalized or any(char in normalized for char in "/\\@"):
+        raise ValueError("数据库主机名无效")
+    try:
+        ipaddress.ip_address(normalized)
+    except ValueError:
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", normalized):
+            raise ValueError("数据库主机名无效")
+    if normalized not in get_settings().database_allowed_host_list:
+        raise ValueError("数据库主机不在 DATABASE_ALLOWED_HOSTS 白名单中")
+    return normalized
+
+
 async def open_database_connection(row: DatabaseConnection):
+    host = validate_database_host(row.host)
     password = decrypt_secret(row.password_encrypted)
     if row.db_type == "postgresql":
-        return await asyncpg.connect(host=row.host, port=row.port, user=row.username, password=password, database=row.database_name, timeout=8, command_timeout=8)
+        return await asyncpg.connect(host=host, port=row.port, user=row.username, password=password, database=row.database_name, timeout=8, command_timeout=8)
     if row.db_type == "mysql":
-        return await asyncmy.connect(host=row.host, port=row.port, user=row.username, password=password, db=row.database_name, connect_timeout=8, autocommit=True)
+        return await asyncmy.connect(host=host, port=row.port, user=row.username, password=password, db=row.database_name, connect_timeout=8, autocommit=True)
     if row.db_type == "sqlserver":
         driver = get_settings().sqlserver_odbc_driver
-        dsn = f"DRIVER={{{driver}}};SERVER={row.host},{row.port};DATABASE={row.database_name};UID={row.username};PWD={password};TrustServerCertificate=yes"
+        dsn = f"DRIVER={{{driver}}};SERVER={host},{row.port};DATABASE={row.database_name};UID={row.username};PWD={password};TrustServerCertificate=yes"
         return await aioodbc.connect(dsn=dsn, timeout=8, autocommit=True)
     if row.db_type == "oracle":
-        dsn = f"{row.host}:{row.port}/{row.database_name}"
+        dsn = f"{host}:{row.port}/{row.database_name}"
         return await oracledb.connect_async(user=row.username, password=password, dsn=dsn, tcp_connect_timeout=8)
     raise RuntimeError(f"未安装或未支持数据库驱动: {row.db_type}")
 
@@ -3531,8 +4596,12 @@ async def inspect_database_security(row: DatabaseConnection, connection) -> dict
 
 @app.post("/api/databases")
 async def create_database(body: DatabaseCreate, ctx: AdminContext, db: AsyncSession = Depends(get_db)):
+    try:
+        host = validate_database_host(body.host)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     workspace_id = await resolve_workspace_id(db, ctx, body.workspace_id, write=True)
-    row = DatabaseConnection(tenant_id=ctx.tenant_id, workspace_id=workspace_id, name=body.name, db_type=body.db_type, host=body.host, port=body.port, database_name=body.database_name, username=body.username, password_encrypted=encrypt_secret(body.password), status="configured", created_by=ctx.user_id)
+    row = DatabaseConnection(tenant_id=ctx.tenant_id, workspace_id=workspace_id, name=body.name, db_type=body.db_type, host=host, port=body.port, database_name=body.database_name, username=body.username, password_encrypted=encrypt_secret(body.password), status="configured", created_by=ctx.user_id)
     db.add(row)
     await db.flush()
     await audit(db, ctx, "database.create", "database", row.id, {"db_type": row.db_type})

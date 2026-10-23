@@ -14,11 +14,23 @@ import DatabasePolicyEditor from "./database_policy";
 import ProductionGovernance from "./production_governance";
 import { WorkspaceCenter, ModelDetail, KnowledgeAssets, DatabaseCenter, PromptCenter, WorkflowGovernance, AgentLifecycle, AgentResources, AccountCenter, AdminResources, MarketCenter, ExtensionsControl, PublishingCenter, ApprovalCenter, PlatformConsole } from "./extended_pages";
 
-const api = axios.create({ baseURL: "/" });
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("eai_token");
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  return config;
+localStorage.removeItem("eai_token");
+localStorage.removeItem("eai_refresh_token");
+const api = axios.create({ baseURL: "/", withCredentials: true });
+let refreshPromise = null;
+api.interceptors.response.use((response) => response, async (error) => {
+  const request = error.config;
+  if (error.response?.status !== 401 || request?._retry || request?.url?.includes("/api/auth/")) throw error;
+  request._retry = true;
+  refreshPromise ||= api.post("/api/auth/refresh", {}, { headers: { "X-Browser-Session": "1" } }).then(({ data }) => {
+    localStorage.setItem("eai_session", "1");
+    return data;
+  }).catch((refreshError) => {
+    localStorage.removeItem("eai_session");
+    throw refreshError;
+  }).finally(() => { refreshPromise = null; });
+  await refreshPromise;
+  return api(request);
 });
 
 const roleLabels = { owner: "所有者", admin: "管理员", developer: "开发者", editor: "编辑者", operator: "运营者", viewer: "查看者" };
@@ -45,19 +57,59 @@ function Login({ onLogin }) {
     event.preventDefault();
     setError("");
     try {
-      const { data } = await api.post("/api/auth/login", { email, password, mfa_code: mfaCode || null });
-      localStorage.setItem("eai_token", data.access_token);
+      const { data } = await api.post("/api/auth/login", { email, password, mfa_code: mfaCode || null }, { headers: { "X-Browser-Session": "1" } });
+      localStorage.setItem("eai_session", "1");
       onLogin(data);
     } catch (err) { setError(errorText(err, "登录失败，请检查账号和密码")); }
   }
+  async function ldapLogin() {
+    setError("");
+    try {
+      const { data } = await api.post("/api/auth/ldap/login", { email, password }, { headers: { "X-Browser-Session": "1" } });
+      localStorage.setItem("eai_session", "1");
+      onLogin(data);
+    } catch (err) { setError(errorText(err, "LDAP 登录失败")); }
+  }
+  async function oidcLogin() {
+    setError("");
+    try {
+      const { data } = await api.post("/api/auth/oidc/start", {});
+      window.location.assign(data.authorization_url);
+    } catch (err) { setError(errorText(err, "企业单点登录暂不可用")); }
+  }
   return <main className="login-page"><form className="login-card" onSubmit={submit}>
+    <div className="button-row"><button type="button" onClick={oidcLogin}>企业单点登录</button><button type="button" onClick={ldapLogin}>LDAP 登录</button></div>
     <div className="brand-mark">AI</div><div className="login-kicker">ENTERPRISE AI PLATFORM</div>
     <h1>企业 AI 中台</h1><p className="muted">统一管理模型、智能体、工作流、知识与企业权限。</p>
     <label>账号<input value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" /></label>
     <label>密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" /></label>
     <label>多因素验证码 <span className="label-hint">启用 MFA 后填写</span><input inputMode="numeric" value={mfaCode} onChange={(e) => setMfaCode(e.target.value)} placeholder="6 位验证码" /></label>
-    {error && <div className="error">{error}</div>}<button className="primary full" type="submit">登录控制台</button>
+    {error && <div className="error">{error}</div>}<button className="primary full" type="submit">登录控制台</button><button type="button" onClick={() => window.location.assign("/reset-password")}>忘记密码</button>
   </form></main>;
+}
+
+function PasswordReset() {
+  const [email, setEmail] = useState("");
+  const [token, setToken] = useState(() => new URLSearchParams(window.location.search).get("token") || "");
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  async function request(event) {
+    event.preventDefault(); setError(""); setMessage("");
+    try {
+      const { data } = await api.post("/api/auth/password-reset/request", { email });
+      if (data.debug_token) setToken(data.debug_token);
+      setMessage("如果账号存在，重置链接已发送；请检查邮箱。开发环境可直接使用返回的令牌。");
+    } catch (err) { setError(errorText(err, "重置邮件请求失败")); }
+  }
+  async function confirm(event) {
+    event.preventDefault(); setError(""); setMessage("");
+    try {
+      await api.post("/api/auth/password-reset/confirm", { token, new_password: password });
+      setMessage("密码已重置，请返回登录。"); setPassword("");
+    } catch (err) { setError(errorText(err, "重置令牌无效或已过期")); }
+  }
+  return <main className="login-page"><section className="login-card"><div className="brand-mark">AI</div><div className="login-kicker">ENTERPRISE AI PLATFORM</div><h1>重置密码</h1><form onSubmit={request}><label>账号邮箱<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label><button className="primary full" type="submit">发送重置链接</button></form><form onSubmit={confirm}><label>重置令牌<input value={token} onChange={(e) => setToken(e.target.value)} minLength="32" required /></label><label>新密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength="12" required /></label><button className="primary full" type="submit">确认新密码</button></form>{message && <div className="notice">{message}</div>}{error && <div className="error">{error}</div>}<button type="button" onClick={() => window.location.assign("/")}>返回登录</button></section></main>;
 }
 
 const workspaceNav = [
@@ -92,15 +144,35 @@ function Overview({ data, go }) {
 }
 
 function Agents({ data, refresh }) {
-  const [agents, setAgents] = useState(data.agents || []); const [selected, setSelected] = useState(""); const [message, setMessage] = useState(""); const [answer, setAnswer] = useState("");
+  const [agents, setAgents] = useState(data.agents || []); const [selected, setSelected] = useState(""); const [message, setMessage] = useState(""); const [answer, setAnswer] = useState(""); const [conversationId, setConversationId] = useState("");
   const [workspaces, setWorkspaces] = useState([]); const [importFile, setImportFile] = useState(null);
   const [form, setForm] = useState({ name: "企业智能助手", slug: `assistant-${Date.now()}`, description: "面向企业员工的知识问答助手", system_prompt: "你是一名企业智能助手，请基于企业知识和权限边界回答问题。", provider_id: "", knowledge_base_id: "", workspace_id: "", agent_type: "chat" }); const [question, setQuestion] = useState("");
+  useEffect(() => { setConversationId(""); setAnswer(""); }, [selected]);
   async function reload() { try { const res = await api.get("/api/agents"); setAgents(res.data); } catch (err) { setMessage(errorText(err, "Agent 列表读取失败")); } }
   useEffect(() => { reload(); api.get("/api/workspaces").then((res) => { setWorkspaces(res.data); if (!form.workspace_id && res.data[0]) setForm((current) => ({ ...current, workspace_id: res.data[0].id })); }).catch(() => {}); }, []);
   async function create(event) { event.preventDefault(); try { const res = await api.post("/api/agents", { ...form, project_id: data.projects[0]?.id, provider_id: form.provider_id || null, knowledge_base_id: form.knowledge_base_id || null, workspace_id: form.workspace_id || null }); await api.patch(`/api/agents/${res.data.id}/config`, { agent_type: form.agent_type, workspace_id: form.workspace_id || null, prompt_template: form.system_prompt, variables: [], memory: {}, capabilities: {}, experience: {}, safety: {} }); setSelected(res.data.id); setMessage("Agent 已创建并完成工作空间配置"); await reload(); await refresh(); } catch (err) { setMessage(errorText(err, "Agent 创建失败")); } }
   async function importAgent() { if (!importFile) return; try { const payload = JSON.parse(await importFile.text()); await api.post("/api/agents/import", { ...payload, project_id: data.projects[0]?.id }); setImportFile(null); setMessage("Agent 已导入"); await reload(); await refresh(); } catch (err) { setMessage(errorText(err, "Agent 导入失败，请检查 JSON")); } }
   async function removeAgent(agent) { if (window.prompt("请输入智能体名称，以确认删除") !== agent.name) return; try { await api.delete("/api/agents/" + agent.id); if (selected === agent.id) { setSelected(""); setAnswer(""); } setMessage("Agent「" + agent.name + "」已删除"); await reload(); await refresh(); } catch (err) { setMessage(errorText(err, "Agent 删除失败")); } }
-  async function chat() { try { const res = await api.post(`/api/agents/${selected}/chat`, { message: question }); setAnswer(res.data.text); setQuestion(""); } catch (err) { setMessage(errorText(err, "Agent 调用失败，请先配置模型")); } }
+  async function chat() {
+    setMessage(""); setAnswer("");
+    try {
+      const response = await fetch(`/api/agents/${selected}/chat/stream`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: question, conversation_id: conversationId || null }) });
+      if (!response.ok) { let detail = "Agent 调用失败，请先配置模型"; try { const payload = await response.json(); detail = payload.detail?.message || payload.detail || detail; } catch (_) {} throw new Error(detail); }
+      const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ""; let text = "";
+      while (true) {
+        const { value, done } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n"); buffer = events.pop() || "";
+        for (const raw of events) {
+          const eventName = raw.match(/^event:\s*(.+)$/m)?.[1] || ""; const dataLine = raw.match(/^data:\s*(.+)$/m)?.[1]; if (!dataLine) continue;
+          const payload = JSON.parse(dataLine);
+          if (eventName === "token") { text += payload.text || ""; setAnswer(text); }
+          if (eventName === "done") { setConversationId(payload.conversation_id || ""); setAnswer(payload.text || text); }
+          if (eventName === "error") throw new Error(payload.message || "Agent 流式调用失败");
+        }
+      }
+      setQuestion("");
+    } catch (err) { setMessage(err.message || "Agent 调用失败，请先配置模型"); }
+  }
   return <div className="page"><PageTitle title="Agent 中心" description="创建、配置、测试和发布可复用的企业智能体。" actions={<><label className="file-button">选择导入文件<input type="file" accept=".json" onChange={(e) => setImportFile(e.target.files[0])}/></label><button onClick={importAgent} disabled={!importFile}>导入 Agent</button><button className="primary" onClick={() => document.getElementById("agent-create")?.scrollIntoView({ behavior: "smooth" })}>+ 创建 Agent</button></>}/>
     <div className="sub-tabs"><button className="active">本地 Agent <b>{agents.length}</b></button><button>A2A Agent <b>0</b></button><button>我的收藏 <b>0</b></button><div className="table-tools"><input placeholder="搜索 Agent"/><button>筛选</button></div></div>
     <div className="agent-layout"><Panel title="Agent 资产" subtitle={`${agents.length} 个智能体，支持模型和知识库绑定`} className="asset-panel"><div className="card-grid">{agents.map((agent) => <article className={`asset-card ${selected === agent.id ? "selected" : ""}`} key={agent.id} role="button" tabIndex={0} onClick={() => setSelected(agent.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setSelected(agent.id); }}><div className="asset-icon">✦</div><div className="asset-card-body"><div className="card-title"><b>{agent.name}</b><button type="button" className="delete-button asset-delete" title="删除 Agent" onClick={(event) => { event.stopPropagation(); removeAgent(agent); }}>删除</button></div><p>{agent.description || "企业智能助手"}</p><small>v{agent.version || 1} · {agent.provider_id ? "已绑定模型" : "未绑定模型"}</small><div><StatusTag value={agent.enabled ? "已就绪" : "已停用"}/></div></div></article>)}</div>{!agents.length && <Empty text="还没有 Agent，请从右侧创建第一个企业智能体。"/>}</Panel>
@@ -201,12 +273,13 @@ function Security({ me }) { const [mfa, setMfa] = useState(Boolean(me?.user?.mfa
 function Audit({ data }) { return <div className="page"><PageTitle title="审计与治理" description="保留关键资源变更、发布和权限操作证据。" actions={<button onClick={() => window.open("/api/audit/export", "_blank")}>导出审计日志</button>}/><Panel title="审计日志" subtitle={`${data.audit.length} 条记录`}><div className="table"><div className="table-head"><span>时间</span><span>操作</span><span>资源</span><span>操作者</span></div>{data.audit.map((item) => <div className="table-row" key={item.id}><span>{formatDate(item.created_at)}</span><b>{item.action}</b><span>{item.resource_type} / {item.resource_id?.slice(0, 8)}</span><span>{item.user_id?.slice(0, 8) || "系统"}</span></div>)}</div>{!data.audit.length && <Empty text="暂无审计记录。"/>}</Panel></div>; }
 
 function App() {
-  const [loggedIn, setLoggedIn] = useState(Boolean(localStorage.getItem("eai_token"))); const [me, setMe] = useState(null); const [page, setPage] = useState("overview"); const [data, setData] = useState({ projects: [], agents: [], workflows: [], applications: [], models: [], kbs: [], skills: [], plugins: [], mcp: [], runs: [], audit: [] });
-  async function refresh() { try { const responses = await Promise.all(["/api/me", "/api/projects", "/api/agents", "/api/applications", "/api/workflows", "/api/models", "/api/knowledge-bases", "/api/skills", "/api/plugins", "/api/mcp-servers", "/api/runs", "/api/audit"].map((path) => api.get(path))); const [meR, projects, agents, applications, workflows, models, kbs, skills, plugins, mcp, runs, audit] = responses; setMe(meR.data); setData({ projects: projects.data, agents: agents.data, applications: applications.data, workflows: workflows.data, models: models.data, kbs: kbs.data, skills: skills.data, plugins: plugins.data, mcp: mcp.data, runs: runs.data, audit: audit.data }); } catch (err) { if (err.response?.status === 401) { localStorage.removeItem("eai_token"); setLoggedIn(false); } } }
+  const [loggedIn, setLoggedIn] = useState(Boolean(localStorage.getItem("eai_session"))); const [me, setMe] = useState(null); const [page, setPage] = useState("overview"); const [data, setData] = useState({ projects: [], agents: [], workflows: [], applications: [], models: [], kbs: [], skills: [], plugins: [], mcp: [], runs: [], audit: [] });
+  async function refresh() { try { const responses = await Promise.all(["/api/me", "/api/projects", "/api/agents", "/api/applications", "/api/workflows", "/api/models", "/api/knowledge-bases", "/api/skills", "/api/plugins", "/api/mcp-servers", "/api/runs", "/api/audit"].map((path) => api.get(path))); const [meR, projects, agents, applications, workflows, models, kbs, skills, plugins, mcp, runs, audit] = responses; setMe(meR.data); setData({ projects: projects.data, agents: agents.data, applications: applications.data, workflows: workflows.data, models: models.data, kbs: kbs.data, skills: skills.data, plugins: plugins.data, mcp: mcp.data, runs: runs.data, audit: audit.data }); } catch (err) { if (err.response?.status === 401) { localStorage.removeItem("eai_session"); setLoggedIn(false); } } }
+  useEffect(() => { const params = new URLSearchParams(window.location.search); if (window.location.pathname === "/auth/oidc/callback" && params.get("code") && params.get("state")) { api.post("/api/auth/oidc/callback", { code: params.get("code"), state: params.get("state") }, { headers: { "X-Browser-Session": "1" } }).then(() => { localStorage.setItem("eai_session", "1"); window.history.replaceState({}, "", "/"); setLoggedIn(true); }).catch(() => { window.history.replaceState({}, "", "/"); }); } }, []);
   useEffect(() => { if (loggedIn) refresh(); }, [loggedIn]);
-  if (!loggedIn) return <Login onLogin={() => setLoggedIn(true)}/>;
+  if (!loggedIn) return window.location.pathname === "/reset-password" ? <PasswordReset /> : <Login onLogin={() => setLoggedIn(true)}/>;
   const content = page === "overview" ? <Overview data={data} go={setPage}/> : page === "workspaces" ? <WorkspaceCenter me={me}/> : page === "agents" ? <Agents data={data} refresh={refresh}/> : page === "agent-studio" ? <AgentStudio data={data}/> : page === "agent-resources" ? <AgentResources data={data}/> : page === "agent-lifecycle" ? <AgentLifecycle data={data}/> : page === "applications" ? <ApplicationsCenter api={api} data={data} refresh={refresh}/> : page === "workflows" ? <Workflows data={data} refresh={refresh}/> : page === "workflow-ops" ? <WorkflowGovernance data={data}/> : page === "models" ? <Models data={data} refresh={refresh}/> : page === "model-experience" ? <ModelExperience api={api} data={data}/> : page === "model-square" ? <ModelSquare data={data}/> : page === "model-detail" ? <ModelDetail data={data}/> : page === "knowledge" ? <Knowledge data={data} refresh={refresh}/> : page === "kb-assets" ? <KnowledgeAssets data={data}/> : page === "databases" ? <><DatabaseCenter data={data}/><div className="page"><DatabasePolicyEditor api={api} role={me?.role}/></div></> : page === "prompts" ? <PromptCenter/> : page === "quick-chat" ? <QuickChat data={data}/> : page === "extensions" ? <ExtensionsControl data={data} refresh={refresh}/> : page === "explore" ? <MarketCenter/> : page === "runs" ? <RunsCenter api={api}/> : page === "members" ? <Members me={me}/> : page === "publishing" ? <PublishingCenter data={data}/> : page === "approvals" ? <ApprovalCenter/> : page === "production-governance" ? <ProductionGovernance api={api} role={me?.role}/> : page === "security" ? <SecurityCenter me={me}/> : page === "admin" ? <PlatformConsole/> : page === "platform-resources" ? <AdminResources/> : page === "account" ? <AccountCenter me={me}/> : <Audit data={data}/>;
-  return <Layout me={me} page={page} setPage={setPage} onLogout={() => { localStorage.removeItem("eai_token"); setLoggedIn(false); }}>{content}</Layout>;
+  return <Layout me={me} page={page} setPage={setPage} onLogout={() => { api.post("/api/auth/logout", {}).catch(() => {}).finally(() => { localStorage.removeItem("eai_session"); setLoggedIn(false); }); }}>{content}</Layout>;
 }
 
 createRoot(document.getElementById("root")).render(<App/>);

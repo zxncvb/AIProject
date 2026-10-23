@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 jobs:
   images:
@@ -38,6 +39,59 @@ jobs:
           context: deploy/backup
           push: true
           tags: ${{ steps.meta.outputs.tag }}-backup
+      - name: Generate backend SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.meta.outputs.tag }}-backend
+          format: cyclonedx-json
+          output-file: sbom-backend.cdx.json
+          artifact-name: sbom-backend.cdx.json
+      - name: Generate frontend SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.meta.outputs.tag }}-frontend
+          format: cyclonedx-json
+          output-file: sbom-frontend.cdx.json
+          artifact-name: sbom-frontend.cdx.json
+      - name: Generate backup SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.meta.outputs.tag }}-backup
+          format: cyclonedx-json
+          output-file: sbom-backup.cdx.json
+          artifact-name: sbom-backup.cdx.json
+      - name: Scan published backend image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: ${{ steps.meta.outputs.tag }}-backend
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+      - name: Scan published frontend image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.tag }}-frontend
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+      - name: Scan published backup image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.tag }}-backup
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign published images
+        env:
+          IMAGE_PREFIX: ${{ steps.meta.outputs.tag }}
+        run: |
+          cosign sign --yes "${IMAGE_PREFIX}-backend"
+          cosign sign --yes "${IMAGE_PREFIX}-frontend"
+          cosign sign --yes "${IMAGE_PREFIX}-backup"
 
   deploy:
     needs: images
@@ -47,6 +101,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-kubectl@v4
+      - uses: sigstore/cosign-installer@v3
+      - name: Verify image signatures
+        env:
+          IMAGE_PREFIX: ${{ needs.images.outputs.tag }}
+        shell: bash
+        run: |
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/.*"
+          issuer="https://token.actions.githubusercontent.com"
+          cosign verify --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" "${IMAGE_PREFIX}-backend" >/dev/null
+          cosign verify --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" "${IMAGE_PREFIX}-frontend" >/dev/null
+          cosign verify --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" "${IMAGE_PREFIX}-backup" >/dev/null
       - shell: bash
         env:
           KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
@@ -57,6 +122,7 @@ jobs:
           kubectl -n enterprise-ai delete job enterprise-ai-migrate --ignore-not-found
           kubectl -n enterprise-ai create job enterprise-ai-migrate --image=${{ needs.images.outputs.tag }}-backend --dry-run=client -o yaml -- /usr/local/bin/alembic -c /app/alembic.ini upgrade head > /tmp/enterprise-ai-migrate.yaml
           kubectl -n enterprise-ai set env --local -f /tmp/enterprise-ai-migrate.yaml --from=secret/enterprise-ai-secrets -o yaml | kubectl apply -f -
+          kubectl -n enterprise-ai patch job enterprise-ai-migrate --type=merge -p '{"spec":{"backoffLimit":0,"ttlSecondsAfterFinished":86400}}'
           kubectl -n enterprise-ai wait --for=condition=complete job/enterprise-ai-migrate --timeout=180s
           kubectl -n enterprise-ai set image deployment/enterprise-ai-backend backend=${{ needs.images.outputs.tag }}-backend
           kubectl -n enterprise-ai set image deployment/enterprise-ai-worker worker=${{ needs.images.outputs.tag }}-backend
@@ -69,6 +135,7 @@ jobs:
           kubectl -n enterprise-ai rollout status deployment/sandbox-controller --timeout=180s
           kubectl -n enterprise-ai rollout status deployment/application-controller --timeout=180s
           kubectl -n enterprise-ai rollout status deployment/enterprise-ai-frontend --timeout=180s
+          kubectl -n enterprise-ai exec deploy/enterprise-ai-backend -c backend -- python -c "import urllib.request; response=urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=10); assert response.status == 200"
 
   evaluation:
     needs: deploy
