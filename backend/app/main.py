@@ -2944,6 +2944,26 @@ def persist_agent_messages(conversation: AgentConversation, history: list[dict[s
     conversation.updated_at = utcnow()
 
 
+def render_agent_prompt(config: AgentConfig | None, fallback: str) -> str:
+    """Render only declared Agent variables; never evaluate template code."""
+    template = str((getattr(config, "prompt_template", "") if config else "") or fallback or "")
+    raw_variables = (getattr(config, "variables_json", []) if config else []) or []
+    values: dict[str, Any] = {}
+    if isinstance(raw_variables, dict):
+        values.update(raw_variables)
+    elif isinstance(raw_variables, list):
+        for item in raw_variables:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("key") or "").strip()
+            if not name:
+                continue
+            values[name] = item.get("value", item.get("default", ""))
+    for name, value in values.items():
+        template = template.replace("{{" + str(name) + "}}", str(value))
+    return template[:20000]
+
+
 async def load_agent_memories(db: AsyncSession, ctx: OperatorContext, agent_id: str, config: AgentConfig | None) -> list[AgentMemory]:
     memory_config = (config.memory_json if config else {}) or {}
     if memory_config.get("enabled", True) is False:
@@ -3060,6 +3080,8 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
     if not provider:
         raise HTTPException(status_code=422, detail="Agent 没有绑定可用模型提供商")
     await enforce_monthly_budget(db, ctx.tenant_id)
+    config = await get_or_create_agent_config(db, ctx, agent)
+    require_supported_agent_type(config)
     quota = await db.scalar(select(ComputeQuota).where(ComputeQuota.tenant_id == ctx.tenant_id))
     month_start = datetime(utcnow().year, utcnow().month, 1, tzinfo=timezone.utc)
     used_tokens = await db.scalar(select(func.coalesce(func.sum(ComputeUsage.tokens), 0)).where(ComputeUsage.tenant_id == ctx.tenant_id, ComputeUsage.created_at >= month_start)) or 0
@@ -3076,13 +3098,11 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
         await db.commit()
         raise HTTPException(status_code=422, detail={"message": "输入未通过安全策略", "reasons": safety["reasons"]})
     user_message = safety["text"] if policy.safety_json.get("mode") == "redact" else body.message
-    system = agent.system_prompt + (f"\n\nEnterprise knowledge context:\n{context_text}" if context_text else "")
+    system = render_agent_prompt(config, agent.system_prompt) + (f"\n\nEnterprise knowledge context:\n{context_text}" if context_text else "")
     conversation = await load_agent_conversation(db, ctx, agent.id, body.conversation_id)
     history = (conversation.messages_json if conversation else body.conversation)[-20:]
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
     started = time.perf_counter()
-    config = await get_or_create_agent_config(db, ctx, agent)
-    require_supported_agent_type(config)
     memories = await load_agent_memories(db, ctx, agent.id, config)
     if memories:
         messages[0]["content"] += "\n\nLong-term user memory:\n" + "\n".join(f"- {item.content}" for item in memories)
@@ -3156,6 +3176,8 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
     if not provider:
         raise HTTPException(status_code=422, detail="Agent 没有绑定可用模型提供商")
     await enforce_monthly_budget(db, ctx.tenant_id)
+    config = await get_or_create_agent_config(db, ctx, agent)
+    require_supported_agent_type(config)
     context_text = ""
     if agent.knowledge_base_id:
         rows = await search_chunks(db, ctx.tenant_id, agent.knowledge_base_id, body.message, 5)
@@ -3167,12 +3189,10 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
         await db.commit()
         raise HTTPException(status_code=422, detail={"message": "输入未通过安全策略", "reasons": safety["reasons"]})
     user_message = safety["text"] if policy.safety_json.get("mode") == "redact" else body.message
-    system = agent.system_prompt + (f"\n\nEnterprise knowledge context:\n{context_text}" if context_text else "")
+    system = render_agent_prompt(config, agent.system_prompt) + (f"\n\nEnterprise knowledge context:\n{context_text}" if context_text else "")
     conversation = await load_agent_conversation(db, ctx, agent.id, body.conversation_id)
     history = (conversation.messages_json if conversation else body.conversation)[-20:]
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
-    config = await get_or_create_agent_config(db, ctx, agent)
-    require_supported_agent_type(config)
     memories = await load_agent_memories(db, ctx, agent.id, config)
     if memories:
         messages[0]["content"] += "\n\nLong-term user memory:\n" + "\n".join(f"- {item.content}" for item in memories)

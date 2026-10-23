@@ -48,6 +48,15 @@ class FakeRateRedis:
         return None
 
 
+def test_agent_prompt_renderer_uses_declared_defaults_without_evaluating_code():
+    config = SimpleNamespace(
+        prompt_template="Role={{role}}; expression={{__import__('os').getcwd()}}",
+        variables_json=[{"name": "role", "default": "operator"}],
+    )
+    rendered = main.render_agent_prompt(config, "fallback")
+    assert rendered == "Role=operator; expression={{__import__('os').getcwd()}}"
+
+
 @pytest.mark.asyncio
 async def test_agent_stream_endpoint_emits_tool_trace_and_persists_completion(monkeypatch):
     agent = SimpleNamespace(
@@ -67,7 +76,12 @@ async def test_agent_stream_endpoint_emits_tool_trace_and_persists_completion(mo
         role="operator",
         custom_permissions=("api:agent:invoke",),
     )
-    config = SimpleNamespace(agent_type="chat", memory_json={"enabled": False})
+    config = SimpleNamespace(
+        agent_type="chat",
+        memory_json={"enabled": False},
+        prompt_template="You are {{role}} for {{company}}.",
+        variables_json=[{"name": "role", "default": "support"}, {"name": "company", "default": "Acme"}],
+    )
 
     async def override_db():
         yield database
@@ -84,7 +98,10 @@ async def test_agent_stream_endpoint_emits_tool_trace_and_persists_completion(mo
     async def fake_agent_config(*_args, **_kwargs):
         return config
 
-    async def fake_stream(*_args, **_kwargs):
+    seen_messages = []
+
+    async def fake_stream(*args, **_kwargs):
+        seen_messages.append(args[1])
         yield {"type": "token", "text": "Hello"}
         yield {"type": "tool_call", "id": "call-1", "name": "plugin_lookup"}
         yield {"type": "tool_result", "name": "plugin_lookup", "status": "success"}
@@ -125,6 +142,7 @@ async def test_agent_stream_endpoint_emits_tool_trace_and_persists_completion(mo
         assert "event: tool_result" in response.text
         assert "event: done" in response.text
         assert '"text": "Hello from tool"' in response.text
+        assert seen_messages[0][0]["content"] == "You are support for Acme."
         assert any(getattr(item, "event_type", "") == "message" for item in database.added)
         assert any(getattr(item, "tokens", None) == 7 for item in database.added)
         assert database.commits == 1
