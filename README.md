@@ -43,7 +43,7 @@ docker compose up -d --build
 
 - 身份：OIDC/LDAP、组到角色映射、邮箱域名限制、自动入租户。
 - 模型：聊天接口、Embedding 接口、向量维度检测和 Qdrant 集合自适应。
-- 应用：`POST /public/apps/{tenant_slug}/{app_slug}/invoke` 可调用绑定的已发布工作流；全代码应用需要配置受控沙箱镜像。
+- 应用：`POST /public/apps/{tenant_slug}/{app_slug}/invoke` 可调用绑定的已发布工作流，并通过返回的 `result_token` 轮询 `/api/v1/public/runs/{result_token}`；应用 manifest 可在允许出站主机上配置 `callback_url` 接收 HMAC 签名终态回调；全代码应用需要配置受控沙箱镜像。
 - 安全：`/api/safety/check`、租户安全策略、PII 脱敏、提示词注入检测。
 - 评测：`POST /api/evaluations/run` 使用测试集调用智能体并返回通过率。
 - FinOps：`/api/finops/summary` 提供 Token、CPU、GPU 用量和租户估算成本；`/api/finops/ledger` 按成本中心返回用量与费用，`/api/finops/export` 导出 CSV。

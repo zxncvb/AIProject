@@ -24,6 +24,7 @@ from .observability import new_trace_id, run_failures, runs_total, tool_calls
 from .safety import inspect_text
 from .sandbox import build_job_manifest
 from .publication import deliver as deliver_publication
+from .public_callback import deliver_public_callback, public_callback_payload
 
 
 QUEUE = "ai_platform:workflow_runs"
@@ -45,6 +46,30 @@ async def is_run_cancelled(run_id: str) -> bool:
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def notify_public_callback(run: WorkflowRun, *, kind: str = "workflow") -> None:
+    """Deliver a best-effort signed callback after a public run is durable."""
+    callback_url = str((run.state_json or {}).get("public_callback_url") or "").strip()
+    if not callback_url:
+        return
+    payload = public_callback_payload(
+        kind=kind,
+        run_id=run.id,
+        tenant_id=run.tenant_id,
+        status=run.status,
+        output=run.output_json,
+        error=run.error,
+        finished_at=run.finished_at,
+    )
+    try:
+        result = await deliver_public_callback(callback_url, payload)
+        if not result.get("delivered"):
+            logger.warning("public workflow callback was not delivered run_id=%s", run.id)
+    except Exception:
+        # The signed result endpoint remains the source of truth; a callback
+        # outage must not turn a successful workflow into a failed workflow.
+        logger.exception("public workflow callback failed run_id=%s", run.id)
 
 
 def _cron_field(value: str, minimum: int, maximum: int) -> set[int]:
@@ -287,11 +312,13 @@ async def execute_run(run_id: str) -> None:
             db.add(ComputeUsage(tenant_id=run.tenant_id, run_id=run.id, cost_center=run.cost_center or "unassigned", cpu_milliseconds=int((time.perf_counter() - started_clock) * 1000), tokens=sum(int((value or {}).get("usage", {}).get("total_tokens", 0)) for value in completed.values() if isinstance(value, dict))))
             await db.commit()
             runs_total.labels(run.tenant_id, "succeeded").inc()
+            await notify_public_callback(run)
         except WorkflowCancelled:
             run.status, run.error, run.finished_at = "cancelled", "已由用户取消", now()
             db.add(ComputeUsage(tenant_id=run.tenant_id, run_id=run.id, cost_center=run.cost_center or "unassigned", cpu_milliseconds=int((time.perf_counter() - started_clock) * 1000)))
             await db.commit()
             runs_total.labels(run.tenant_id, "cancelled").inc()
+            await notify_public_callback(run)
         except Exception as exc:
             run.error = str(exc)
             compensation_errors: list[str] = []
@@ -305,6 +332,7 @@ async def execute_run(run_id: str) -> None:
             await db.commit()
             run_failures.labels(run.tenant_id).inc()
             runs_total.labels(run.tenant_id, "failed").inc()
+            await notify_public_callback(run)
 
 
 async def execute_evaluation(job_id: str) -> None:

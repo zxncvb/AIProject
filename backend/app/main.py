@@ -191,6 +191,7 @@ from .services.alerts import send_alert
 from .services.application_runtime import build_application_manifests, build_buildkit_manifest, build_image_name, validate_application_domain, validate_build_source
 from .services.content_security import DOCUMENT_EXTENSIONS, extract_text, inspect_upload
 from .services.evaluation import judge_answer
+from .services.public_callback import validate_public_callback_url
 from .services.sandbox import build_job_manifest
 from .services.storage import content_type_for, delete_object, get_bytes, object_key, presign_get, put_bytes
 from .services.totp import provisioning_uri, random_base32, verify as verify_totp
@@ -1698,6 +1699,10 @@ async def create_application_version(application_id: str, body: ApplicationVersi
     if not app_row:
         raise HTTPException(status_code=404, detail="应用不存在")
     await require_project_access(db, ctx, app_row.project_id, write=True)
+    try:
+        validate_public_callback_url(body.manifest.get("callback_url") if isinstance(body.manifest, dict) else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     latest = await db.scalar(select(func.max(ApplicationVersion.version)).where(ApplicationVersion.application_id == application_id, ApplicationVersion.tenant_id == ctx.tenant_id)) or 0
     version = ApplicationVersion(tenant_id=ctx.tenant_id, application_id=application_id, version=int(latest) + 1, source_json=body.source, manifest_json=body.manifest, created_by=ctx.user_id)
     db.add(version)
@@ -1716,6 +1721,10 @@ async def deploy_application(application_id: str, ctx: EditorContext, db: AsyncS
     version = await db.scalar(select(ApplicationVersion).where(ApplicationVersion.application_id == application_id, ApplicationVersion.tenant_id == ctx.tenant_id).order_by(ApplicationVersion.version.desc()))
     if not version:
         raise HTTPException(status_code=422, detail="应用还没有版本")
+    try:
+        validate_public_callback_url((version.manifest_json or {}).get("callback_url"))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if app_row.app_type == "full_code":
         manifest = version.manifest_json or {}
         source = version.source_json or {}
@@ -2084,7 +2093,7 @@ def validate_public_input(schema: dict[str, Any], input_data: dict[str, Any]) ->
     return _validate_public_input_schema(schema, input_data)
 
 
-PUBLIC_MANIFEST_SECRET_KEYS = {"secret", "token", "api_key", "apikey", "authorization", "headers", "password", "env", "source"}
+PUBLIC_MANIFEST_SECRET_KEYS = {"secret", "token", "api_key", "apikey", "authorization", "headers", "password", "env", "source", "callback_url"}
 
 
 def sanitize_public_manifest_value(value: Any, parent_key: str = "") -> Any:
@@ -2238,6 +2247,10 @@ async def invoke_public_application(
     started = time.perf_counter()
     await enforce_public_app_rate_limit(tenant.id, row.id, manifest, request, row.public_rate_limit_per_minute)
     validate_public_input(manifest.get("input_schema") or {}, body.input)
+    try:
+        callback_url = validate_public_callback_url(manifest.get("callback_url"))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     expected_key = str(manifest.get("app_key") or (version.source_json or {}).get("public_key") or "")
     expected_hash = str(manifest.get("app_key_sha256") or "")
     if row.app_type == "full_code" and not (expected_key or expected_hash):
@@ -2265,7 +2278,7 @@ async def invoke_public_application(
                 job_manifest = build_job_manifest("validation", runtime, source, int(manifest.get("timeout_seconds", 300)), int(manifest.get("cpu_millicores", 500)), int(manifest.get("memory_mb", 512)))
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=422, detail=f"全代码应用运行时无效：{exc}") from exc
-            sandbox = SandboxRun(tenant_id=tenant.id, application_id=row.id, runtime=runtime, source_json={"source": source, "timeout_seconds": int(manifest.get("timeout_seconds", 300)), "cpu_millicores": int(manifest.get("cpu_millicores", 500)), "memory_mb": int(manifest.get("memory_mb", 512))}, manifest_json=job_manifest, created_by=row.created_by)
+            sandbox = SandboxRun(tenant_id=tenant.id, application_id=row.id, runtime=runtime, source_json={"source": source, "callback_url": callback_url, "timeout_seconds": int(manifest.get("timeout_seconds", 300)), "cpu_millicores": int(manifest.get("cpu_millicores", 500)), "memory_mb": int(manifest.get("memory_mb", 512))}, manifest_json=job_manifest, created_by=row.created_by)
             db.add(sandbox)
             await db.flush()
             sandbox.manifest_json = build_job_manifest(sandbox.id, runtime, source, int(manifest.get("timeout_seconds", 300)), int(manifest.get("cpu_millicores", 500)), int(manifest.get("memory_mb", 512)))
@@ -2292,7 +2305,7 @@ async def invoke_public_application(
     workflow_input = resolve_public_value((workflow_action or {}).get("input", body.input), body.input)
     if not isinstance(workflow_input, dict):
         raise HTTPException(status_code=422, detail="workflow 动作的 input 必须解析为 JSON 对象")
-    run = WorkflowRun(tenant_id=tenant.id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=workflow.published_version, cost_center=cost_center, input_json=workflow_input, trace_id="", created_by=row.created_by)
+    run = WorkflowRun(tenant_id=tenant.id, project_id=workflow.project_id, workflow_id=workflow.id, workflow_version=workflow.published_version, cost_center=cost_center, input_json=workflow_input, state_json={"public_callback_url": callback_url} if callback_url else {}, trace_id="", created_by=row.created_by)
     db.add(run)
     await db.flush()
     db.add(AuditEvent(tenant_id=tenant.id, actor_id=None, action="application.invoke", resource_type="application", resource_id=row.id, detail_json={"status": "queued", "version": version.version, "mode": "workflow", "workflow_id": workflow.id, "request_id": getattr(request.state, "request_id", "")}))

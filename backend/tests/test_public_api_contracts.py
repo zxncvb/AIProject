@@ -5,6 +5,7 @@ import pytest
 
 from app import main
 from app.db import get_admin_db
+from app.services import public_callback
 
 
 class FakeRedis:
@@ -103,3 +104,20 @@ async def test_public_invoke_rejects_invalid_input_over_http(monkeypatch):
             assert response.json()["detail"]["code"] == "invalid_input"
     finally:
         main.app.dependency_overrides.pop(get_admin_db, None)
+
+
+def test_public_callback_is_allowlisted_and_signed_payload_is_stable(monkeypatch):
+    monkeypatch.setattr(
+        public_callback,
+        "get_settings",
+        lambda: SimpleNamespace(app_env="test", allowed_hosts={"hooks.example.com"}, app_secret_key="secret", publication_signing_secret=""),
+    )
+    assert public_callback.validate_public_callback_url("https://hooks.example.com/result") == "https://hooks.example.com/result"
+    with pytest.raises(ValueError, match="允许的出站主机"):
+        public_callback.validate_public_callback_url("https://169.254.169.254/latest/meta-data")
+    payload = public_callback.public_callback_payload(
+        kind="workflow", run_id="run-1", tenant_id="tenant-1", status="succeeded", output={"answer": "ok"}
+    )
+    assert payload["event"] == "public_application.run.completed"
+    assert payload["output"] == {"answer": "ok"}
+    assert payload["error"] is None
