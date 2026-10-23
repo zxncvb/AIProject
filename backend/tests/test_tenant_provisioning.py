@@ -2,6 +2,8 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 
 from app import main
 from app.models import (
@@ -40,6 +42,26 @@ class ProvisioningDatabase:
         return None
 
 
+class BootstrapLockDatabase:
+    def __init__(self):
+        self.calls = []
+
+    async def execute(self, statement, params):
+        self.calls.append((str(statement), params))
+
+
+class ConflictingTenantDatabase(ProvisioningDatabase):
+    def __init__(self):
+        super().__init__()
+        self.rolled_back = False
+
+    async def flush(self):
+        raise IntegrityError("insert tenant", {}, RuntimeError("duplicate slug"))
+
+    async def rollback(self):
+        self.rolled_back = True
+
+
 @pytest.mark.asyncio
 async def test_tenant_creation_provisions_usable_defaults(monkeypatch):
     monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(
@@ -67,4 +89,31 @@ async def test_tenant_creation_provisions_usable_defaults(monkeypatch):
     assert {row.slug for row in db.added if isinstance(row, Role)} == {"owner", "admin", "operator", "developer", "viewer"}
     assert any(isinstance(row, TenantPolicy) for row in db.added)
     assert any(isinstance(row, AuditEvent) and row.action == "tenant.create" for row in db.added)
+
+
+@pytest.mark.asyncio
+async def test_postgres_bootstrap_uses_transaction_advisory_lock(monkeypatch):
+    monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(
+        database_admin_url="postgresql+asyncpg://platform:secret@db/platform",
+        database_url="",
+    ))
+    db = BootstrapLockDatabase()
+
+    await main.acquire_bootstrap_lock(db)
+
+    assert len(db.calls) == 1
+    assert "pg_advisory_xact_lock" in db.calls[0][0]
+    assert db.calls[0][1]["lock_key"].startswith("enterprise-ai-platform.bootstrap")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_tenant_slug_conflict_returns_conflict(monkeypatch):
+    monkeypatch.setattr(main, "get_settings", lambda: SimpleNamespace(database_url="sqlite+aiosqlite:///test.db"))
+    db = ConflictingTenantDatabase()
+
+    with pytest.raises(HTTPException) as exc:
+        await main.create_tenant(TenantCreate(name="客户租户", slug="customer-a"), SimpleNamespace(user_id="owner-1"), db)
+
+    assert exc.value.status_code == 409
+    assert db.rolled_back is True
 

@@ -567,9 +567,21 @@ async def provision_tenant_defaults(db: AsyncSession, tenant: Tenant, owner_id: 
     return {"project_id": project.id, "organization_id": organization.id, "workspace_id": workspace.id}
 
 
+async def acquire_bootstrap_lock(db: AsyncSession) -> None:
+    """Serialize bootstrap seeding when multiple API replicas start together."""
+    settings = get_settings()
+    database_url = settings.database_admin_url or settings.database_url
+    if "postgresql" in database_url.lower():
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+            {"lock_key": "enterprise-ai-platform.bootstrap.v1"},
+        )
+
+
 async def bootstrap() -> None:
     settings = get_settings()
     async with AdminSessionLocal() as db:
+        await acquire_bootstrap_lock(db)
         tenant = await db.scalar(select(Tenant).where(Tenant.slug == settings.bootstrap_tenant_slug))
         if not tenant:
             tenant = Tenant(name=settings.bootstrap_tenant, slug=settings.bootstrap_tenant_slug)
@@ -1593,7 +1605,11 @@ async def create_tenant(body: TenantCreate, ctx: Context, db: AsyncSession = Dep
         raise HTTPException(status_code=409, detail="租户标识已存在")
     tenant = Tenant(name=body.name.strip(), slug=slug, is_active=True)
     db.add(tenant)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="租户标识已存在") from exc
     defaults = await provision_tenant_defaults(db, tenant, ctx.user_id)
     db.add(AuditEvent(tenant_id=tenant.id, actor_id=ctx.user_id, action="tenant.create", resource_type="tenant", resource_id=tenant.id, detail_json={"slug": slug}))
     await db.commit()
