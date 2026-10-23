@@ -2208,6 +2208,8 @@ async def public_run_result(result_token: str, request: Request, db: AsyncSessio
         row = await db.scalar(select(WorkflowRun).where(WorkflowRun.id == run_id, WorkflowRun.tenant_id == tenant_id))
         if row and application_id:
             application = await db.scalar(select(Application).where(Application.id == application_id, Application.tenant_id == tenant_id, Application.status == "deployed"))
+            if application and (str(application.id) != application_id or str(application.tenant_id) != tenant_id):
+                application = None
             version = await db.scalar(select(ApplicationVersion).where(ApplicationVersion.application_id == application_id, ApplicationVersion.status == "deployed").order_by(ApplicationVersion.version.desc())) if application else None
             version_manifest = version.manifest_json or {} if version else {}
             actions = version_manifest.get("actions") if isinstance(version_manifest.get("actions"), list) else []

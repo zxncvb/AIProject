@@ -22,6 +22,9 @@ class FakeRedis:
     async def aclose(self):
         return None
 
+    async def exists(self, _key):
+        return 0
+
 
 class FakeDatabase:
     def __init__(self, *values):
@@ -102,6 +105,45 @@ async def test_public_invoke_rejects_invalid_input_over_http(monkeypatch):
             response = await client.post("/api/v1/public/apps/acme/helpdesk/invoke", json={"input": {}})
             assert response.status_code == 422
             assert response.json()["detail"]["code"] == "invalid_input"
+    finally:
+        main.app.dependency_overrides.pop(get_admin_db, None)
+
+
+@pytest.mark.asyncio
+async def test_public_result_token_is_bound_to_tenant_application_and_run(monkeypatch):
+    row = SimpleNamespace(
+        id="run-1",
+        tenant_id="tenant-1",
+        workflow_id="workflow-1",
+        status="succeeded",
+        output_json={"answer": "async-ok"},
+        error=None,
+        created_at=None,
+        started_at=None,
+        finished_at=None,
+    )
+    application = SimpleNamespace(id="app-1", tenant_id="tenant-1", status="deployed")
+    version = SimpleNamespace(version=2, manifest_json={"workflow_id": "workflow-1"})
+    database = FakeDatabase(row, application, version)
+
+    async def override_db():
+        yield database
+
+    monkeypatch.setattr(main, "Redis", FakeRedis)
+    main.app.dependency_overrides[get_admin_db] = override_db
+    try:
+        token = main.create_public_result_token("workflow", "run-1", "tenant-1", "app-1")
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(f"/api/v1/public/runs/{token}")
+            assert response.status_code == 200
+            assert response.json()["output"] == {"answer": "async-ok"}
+
+        mismatched_token = main.create_public_result_token("workflow", "run-1", "tenant-1", "other-app")
+        database.values = iter([row, application, version])
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(f"/api/v1/public/runs/{mismatched_token}")
+            assert response.status_code == 404
     finally:
         main.app.dependency_overrides.pop(get_admin_db, None)
 

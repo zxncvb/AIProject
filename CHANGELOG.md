@@ -5,6 +5,11 @@
 - 将 Agent SSE 帧解析抽为 `frontend/src/agent_stream.js`，新增 Node 原生测试覆盖分片、CRLF、多行 data 和尾帧。
 - CI 前端 job 现在先执行 `npm test`，再执行生产构建。
 
+## 2026-10-23：公开结果令牌绑定回归
+
+- 结果轮询在数据库查询后再次显式校验租户与应用 ID，避免跨应用令牌因适配器或查询变更而误放行。
+- 新增 ASGI 集成测试覆盖签名结果查询、异步输出和应用绑定失败。
+
 ## 2026-10-23：Agent 前端流式交互闭环
 
 - 前端 Agent 控制台消费 `token`、`tool_call`、`tool_result`、`done` 和 `error` SSE 事件，展示工具调用轨迹。
