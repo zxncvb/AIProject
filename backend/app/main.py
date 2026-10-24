@@ -2900,6 +2900,8 @@ async def create_agent(body: AgentCreate, ctx: EditorContext, db: AsyncSession =
         raise HTTPException(status_code=404, detail="模型提供商不存在")
     if body.knowledge_base_id and not await db.scalar(select(KnowledgeBase).where(KnowledgeBase.id == body.knowledge_base_id, KnowledgeBase.tenant_id == ctx.tenant_id)):
         raise HTTPException(status_code=404, detail="知识库不存在")
+    if body.knowledge_base_id:
+        await require_kb_access(body.knowledge_base_id, ctx, db)
     workspace_id = project.workspace_id
     if body.workspace_id:
         await require_workspace_access(db, ctx, body.workspace_id, write=True)
@@ -3146,6 +3148,8 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
     if not agent:
         raise HTTPException(status_code=404, detail="Agent 不存在或已禁用")
     await require_project_access(db, ctx, agent.project_id)
+    if agent.knowledge_base_id:
+        await require_kb_access(agent.knowledge_base_id, ctx, db)
     provider_stmt = select(ModelProvider).where(ModelProvider.tenant_id == ctx.tenant_id, ModelProvider.enabled.is_(True))
     if agent.provider_id:
         provider_stmt = provider_stmt.where(ModelProvider.id == agent.provider_id)
@@ -3258,6 +3262,8 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
     if not agent:
         raise HTTPException(status_code=404, detail="Agent 不存在或已禁用")
     await require_project_access(db, ctx, agent.project_id)
+    if agent.knowledge_base_id:
+        await require_kb_access(agent.knowledge_base_id, ctx, db)
     provider = await db.scalar(select(ModelProvider).where(ModelProvider.id == agent.provider_id, ModelProvider.tenant_id == ctx.tenant_id, ModelProvider.enabled.is_(True))) if agent.provider_id else await db.scalar(select(ModelProvider).where(ModelProvider.tenant_id == ctx.tenant_id, ModelProvider.enabled.is_(True)))
     if not provider:
         raise HTTPException(status_code=422, detail="Agent 没有绑定可用模型提供商")

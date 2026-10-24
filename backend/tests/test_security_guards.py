@@ -82,6 +82,15 @@ def test_public_runtime_endpoints_use_controller_database_dependency():
         assert "Depends(get_controller_db)" in section
 
 
+def test_agent_knowledge_binding_and_chat_enforce_knowledge_base_access():
+    source = (Path(__file__).parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    for marker in ("async def create_agent", "async def chat_agent", "async def stream_chat_agent"):
+        start = source.index(marker)
+        end = source.find("\nasync def ", start + 1)
+        section = source[start:] if end < 0 else source[start:end]
+        assert "require_kb_access" in section
+
+
 def test_public_callback_outbox_has_operational_metrics_and_alerts():
     source = (Path(__file__).parents[1] / "app" / "main.py").read_text(encoding="utf-8")
     rules = (Path(__file__).parents[2] / "deploy" / "observability" / "rules" / "public-callback.yml").read_text(encoding="utf-8")
