@@ -193,11 +193,13 @@ function PublicApplication({ tenantSlug, appSlug }) {
   </section></main>;
 }
 
-const workspaceNav = [
+const legacyWorkspaceNav = [
   ["overview", "工作台", "⌂"], ["workspaces", "工作空间", "▣"], ["agents", "Agent 中心", "✦"], ["agent-studio", "Agent 编排", "✧"], ["agent-resources", "Agent 资源编排", "⊕"], ["agent-lifecycle", "Agent 生命周期", "↻"], ["applications", "应用中心", "▦"], ["workflows", "工作流", "⌘"], ["workflow-ops", "工作流治理", "✓"],
   ["models", "模型与算力", "◉"], ["model-experience", "模型体验", "▣"], ["model-square", "模型广场", "◇"], ["model-detail", "模型详情", "⌁"], ["knowledge", "知识库", "▤"], ["kb-assets", "知识库扩展", "◫"], ["databases", "数据库", "▥"], ["prompts", "提示词模板", "✎"], ["quick-chat", "快速对话", "☄"], ["extensions", "Skills / 插件", "◇"], ["explore", "探索中心", "☆"], ["runs", "运行与观测", "◌"]
 ];
-const adminNav = [["members", "组织与权限", "♙"], ["publishing", "发布管理", "↗"], ["approvals", "审批中心", "✓"], ["production-governance", "生产治理", "⚙"], ["security", "安全与身份", "盾"], ["admin", "平台管理", "▦"], ["platform-resources", "平台资源管理", "▤"], ["account", "账号中心", "♙"], ["audit", "审计与治理", "≡"]];
+const legacyAdminNav = [["members", "组织与权限", "♙"], ["publishing", "发布管理", "↗"], ["approvals", "审批中心", "✓"], ["production-governance", "生产治理", "⚙"], ["security", "安全与身份", "盾"], ["admin", "平台管理", "▦"], ["platform-resources", "平台资源管理", "▤"], ["account", "账号中心", "♙"], ["audit", "审计与治理", "≡"]];
+const workspaceNav = [["overview", "工作台", "⌂"], ["agents", "Agent", "✦"], ["workflows", "工作流", "⌘"], ["knowledge", "知识库", "▤"], ["models", "模型", "◉"], ["extensions", "工具扩展", "◇"], ["runs", "运行记录", "◌"]];
+const adminNav = [["members", "成员与权限", "♙"], ["publishing", "发布管理", "↗"], ["security", "安全与身份", "盾"], ["audit", "审计日志", "≡"]];
 
 function Layout({ me, page, setPage, onLogout, children }) {
   const current = [...workspaceNav, ...adminNav].find((item) => item[0] === page); const [workspaceName, setWorkspaceName] = useState(me?.tenant?.name || "示例企业");
