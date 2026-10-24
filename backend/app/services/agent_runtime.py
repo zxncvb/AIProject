@@ -343,7 +343,7 @@ async def _execute_tool_calls(db: AsyncSession, tools: dict[str, BoundTool], cal
     return messages, trace
 
 
-async def run_agent_loop(db: AsyncSession, messages: list[dict[str, Any]], *, tenant_id: str, actor_id: str | None, config: AgentConfig | None, preferred_provider_id: str | None = None, max_rounds: int = 3) -> dict[str, Any]:
+async def run_agent_loop(db: AsyncSession, messages: list[dict[str, Any]], *, tenant_id: str, actor_id: str | None, config: AgentConfig | None, preferred_provider_id: str | None = None, max_rounds: int = 3, response_format: dict[str, Any] | None = None) -> dict[str, Any]:
     bound_tools = await load_agent_tools(db, tenant_id, config)
     tool_schemas = [_tool_schema(item) for item in bound_tools.values()]
     current = list(messages)
@@ -351,7 +351,7 @@ async def run_agent_loop(db: AsyncSession, messages: list[dict[str, Any]], *, te
     trace: list[dict[str, Any]] = []
     result: dict[str, Any] = {}
     for round_index in range(max(1, min(max_rounds, 3))):
-        result = await call_routed_chat(db, current, tenant_id=tenant_id, preferred_provider_id=preferred_provider_id, tools=tool_schemas or None)
+        result = await call_routed_chat(db, current, tenant_id=tenant_id, preferred_provider_id=preferred_provider_id, tools=tool_schemas or None, response_format=response_format)
         _merge_usage(usage, result.get("usage"))
         calls = _normal_tool_calls(result.get("tool_calls") or [])
         if not calls:
@@ -364,7 +364,7 @@ async def run_agent_loop(db: AsyncSession, messages: list[dict[str, Any]], *, te
     return {**result, "text": result.get("text") or "工具调用已达到最大轮次，请稍后重试。", "usage": usage, "tool_trace": trace, "tool_rounds": max_rounds}
 
 
-async def stream_agent_loop(db: AsyncSession, messages: list[dict[str, Any]], *, tenant_id: str, actor_id: str | None, config: AgentConfig | None, preferred_provider_id: str | None = None, max_rounds: int = 3):
+async def stream_agent_loop(db: AsyncSession, messages: list[dict[str, Any]], *, tenant_id: str, actor_id: str | None, config: AgentConfig | None, preferred_provider_id: str | None = None, max_rounds: int = 3, response_format: dict[str, Any] | None = None):
     """Yield text/tool/final events while preserving the same tool loop semantics."""
     bound_tools = await load_agent_tools(db, tenant_id, config)
     tool_schemas = [_tool_schema(item) for item in bound_tools.values()]
@@ -376,7 +376,7 @@ async def stream_agent_loop(db: AsyncSession, messages: list[dict[str, Any]], *,
     for round_index in range(max(1, min(max_rounds, 3))):
         round_text = ""
         deltas: dict[int, dict[str, Any]] = {}
-        async for event in stream_routed_chat(db, current, tenant_id=tenant_id, preferred_provider_id=preferred_provider_id, tools=tool_schemas or None):
+        async for event in stream_routed_chat(db, current, tenant_id=tenant_id, preferred_provider_id=preferred_provider_id, tools=tool_schemas or None, response_format=response_format):
             provider_id = event.get("provider_id") or provider_id
             model = event.get("model") or model
             if event["type"] == "text":

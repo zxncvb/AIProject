@@ -171,6 +171,7 @@ class AgentChatRequest(BaseModel):
     conversation: list[dict[str, str]] = Field(default_factory=list)
     conversation_id: str | None = Field(default=None, min_length=1, max_length=36)
     cost_center: str | None = Field(default=None, max_length=120)
+    output_schema: dict[str, Any] | None = Field(default=None, description="可选 object JSON Schema；启用后模型必须返回合法结构化 JSON")
 
 
 class AgentMemoryCreate(BaseModel):

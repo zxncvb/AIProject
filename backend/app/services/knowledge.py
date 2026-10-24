@@ -52,6 +52,39 @@ SEARCH_METADATA_FIELDS = {
 }
 
 
+def build_citations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return stable, tenant-scoped citation metadata for model context and UI."""
+    citations = []
+    seen: set[str] = set()
+    for index, row in enumerate(rows, start=1):
+        chunk_id = str(row.get("chunk_id") or "")
+        document_id = str(row.get("document_id") or "")
+        key = chunk_id or document_id
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        citations.append({
+            "index": len(citations) + 1,
+            "chunk_id": chunk_id,
+            "document_id": document_id,
+            "source": str(row.get("source") or ""),
+            "score": float(row.get("score") or 0),
+        })
+    return citations
+
+
+def format_citation_context(rows: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    citations = build_citations(rows)
+    by_key = {item.get("chunk_id") or item.get("document_id"): item["index"] for item in citations}
+    blocks = []
+    for row in rows:
+        key = row.get("chunk_id") or row.get("document_id")
+        marker = by_key.get(key)
+        if marker:
+            blocks.append(f"[citation:{marker}] {row.get('content', '')}")
+    return "\n\n".join(blocks), citations
+
+
 def normalize_metadata_filter(metadata: dict[str, Any] | None) -> dict[str, str | list[str]]:
     """Keep search filters finite and restricted to document metadata fields."""
     if not metadata:

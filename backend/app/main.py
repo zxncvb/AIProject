@@ -179,7 +179,8 @@ from .schemas import (
 from .security import create_access_token, create_refresh_token, decode_access_token, decode_refresh_token, decrypt_secret, encrypt_secret, hash_password, secret_backend_status, verify_password
 from .services.auth_sessions import clear_login_failures, consume_email_verification, consume_password_reset, create_email_verification, create_password_reset, is_login_locked, is_token_revoked, record_login_failure, revoke_token, revoke_user_sessions
 from .services.crypto import checksum, chunk_text
-from .services.knowledge import normalize_metadata_filter, search_chunks
+from .services.knowledge import format_citation_context, normalize_metadata_filter, search_chunks
+from .services.structured_output import StructuredOutputError, normalize_output_schema, openai_response_format, parse_structured_output
 from .services.identity import BUILTIN_ROLES, mapped_role, parse_role_mapping
 from .services.ldap_auth import LDAPError, authenticate as ldap_authenticate
 from .services.llm import call_chat, call_routed_chat
@@ -3153,15 +3154,20 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
     await enforce_monthly_budget(db, ctx.tenant_id)
     config = await get_or_create_agent_config(db, ctx, agent)
     require_supported_agent_type(config)
+    try:
+        output_schema = normalize_output_schema(getattr(body, "output_schema", None))
+    except StructuredOutputError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_output_schema", "message": str(exc)}) from exc
     quota = await db.scalar(select(ComputeQuota).where(ComputeQuota.tenant_id == ctx.tenant_id))
     month_start = datetime(utcnow().year, utcnow().month, 1, tzinfo=timezone.utc)
     used_tokens = await db.scalar(select(func.coalesce(func.sum(ComputeUsage.tokens), 0)).where(ComputeUsage.tenant_id == ctx.tenant_id, ComputeUsage.created_at >= month_start)) or 0
     if quota and quota.enabled and int(used_tokens) >= quota.monthly_tokens:
         raise HTTPException(status_code=429, detail="已达到租户月度 Token 配额")
     context_text = ""
+    citations: list[dict[str, Any]] = []
     if agent.knowledge_base_id:
         rows = await search_chunks(db, ctx.tenant_id, agent.knowledge_base_id, body.message, 5)
-        context_text = "\n\n".join(row["content"] for row in rows)
+        context_text, citations = format_citation_context(rows)
     policy = await tenant_policy(db, ctx.tenant_id)
     safety = inspect_text(body.message, policy.safety_json)
     if safety["blocked"]:
@@ -3169,7 +3175,7 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
         await db.commit()
         raise HTTPException(status_code=422, detail={"message": "输入未通过安全策略", "reasons": safety["reasons"]})
     user_message = safety["text"] if policy.safety_json.get("mode") == "redact" else body.message
-    system = render_agent_prompt(config, agent.system_prompt) + (f"\n\nEnterprise knowledge context:\n{context_text}" if context_text else "")
+    system = render_agent_prompt(config, agent.system_prompt) + (f"\n\nEnterprise knowledge context:\n{context_text}\n\n引用规则：如使用知识库内容，请在回答中使用 [citation:N] 标记对应来源；不要编造不存在的引用。" if context_text else "")
     conversation = await load_agent_conversation(db, ctx, agent.id, body.conversation_id)
     history = (conversation.messages_json if conversation else body.conversation)[-20:]
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
@@ -3177,12 +3183,18 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
     memories = await load_agent_memories(db, ctx, agent.id, config)
     if memories:
         messages[0]["content"] += "\n\nLong-term user memory:\n" + "\n".join(f"- {item.content}" for item in memories)
-    result = await run_agent_loop(db, messages, tenant_id=ctx.tenant_id, actor_id=ctx.user_id, config=config, preferred_provider_id=agent.provider_id)
+    result = await run_agent_loop(db, messages, tenant_id=ctx.tenant_id, actor_id=ctx.user_id, config=config, preferred_provider_id=agent.provider_id, response_format=openai_response_format(output_schema) if output_schema else None)
+    structured_output = None
+    if output_schema:
+        try:
+            structured_output = parse_structured_output(result["text"], output_schema)
+        except StructuredOutputError as exc:
+            raise HTTPException(status_code=502, detail={"code": "invalid_model_output", "message": str(exc)}) from exc
     usage = result.get("usage") or {}
     total_tokens = int(usage.get("total_tokens", 0))
     cost_center = await resolve_cost_center(db, ctx.tenant_id, agent.project_id, body.cost_center, "agent")
     db.add(ComputeUsage(tenant_id=ctx.tenant_id, cost_center=cost_center, tokens=total_tokens))
-    event = AgentEvent(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, event_type="message", tokens=total_tokens, latency_ms=int((time.perf_counter() - started) * 1000), detail_json={"provider_id": result["provider_id"], "model": result["model"], "tool_trace": result.get("tool_trace", []), "tool_rounds": result.get("tool_rounds", 0)})
+    event = AgentEvent(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, event_type="message", tokens=total_tokens, latency_ms=int((time.perf_counter() - started) * 1000), detail_json={"provider_id": result["provider_id"], "model": result["model"], "tool_trace": result.get("tool_trace", []), "tool_rounds": result.get("tool_rounds", 0), "citations": citations, "structured_output": bool(output_schema)})
     db.add(event)
     if not conversation:
         conversation = AgentConversation(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, title=user_message[:160])
@@ -3191,7 +3203,7 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
     await audit(db, ctx, "agent.chat", "agent", agent.id, {"provider_id": result["provider_id"], "usage": result.get("usage", {}), "tool_rounds": result.get("tool_rounds", 0)})
     await db.commit()
     await db.flush()
-    return {"agent_id": agent.id, "event_id": event.id, "conversation_id": conversation.id, "text": result["text"], "usage": result.get("usage", {}), "tool_trace": result.get("tool_trace", []), "tool_rounds": result.get("tool_rounds", 0)}
+    return {"agent_id": agent.id, "event_id": event.id, "conversation_id": conversation.id, "text": result["text"], "structured_output": structured_output, "citations": citations, "usage": result.get("usage", {}), "tool_trace": result.get("tool_trace", []), "tool_rounds": result.get("tool_rounds", 0)}
 
 
 async def persist_agent_stream_failure(
@@ -3249,10 +3261,15 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
     await enforce_monthly_budget(db, ctx.tenant_id)
     config = await get_or_create_agent_config(db, ctx, agent)
     require_supported_agent_type(config)
+    try:
+        output_schema = normalize_output_schema(getattr(body, "output_schema", None))
+    except StructuredOutputError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_output_schema", "message": str(exc)}) from exc
     context_text = ""
+    citations: list[dict[str, Any]] = []
     if agent.knowledge_base_id:
         rows = await search_chunks(db, ctx.tenant_id, agent.knowledge_base_id, body.message, 5)
-        context_text = "\n\n".join(row["content"] for row in rows)
+        context_text, citations = format_citation_context(rows)
     policy = await tenant_policy(db, ctx.tenant_id)
     safety = inspect_text(body.message, policy.safety_json)
     if safety["blocked"]:
@@ -3260,7 +3277,7 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
         await db.commit()
         raise HTTPException(status_code=422, detail={"message": "输入未通过安全策略", "reasons": safety["reasons"]})
     user_message = safety["text"] if policy.safety_json.get("mode") == "redact" else body.message
-    system = render_agent_prompt(config, agent.system_prompt) + (f"\n\nEnterprise knowledge context:\n{context_text}" if context_text else "")
+    system = render_agent_prompt(config, agent.system_prompt) + (f"\n\nEnterprise knowledge context:\n{context_text}\n\n引用规则：如使用知识库内容，请在回答中使用 [citation:N] 标记对应来源；不要编造不存在的引用。" if context_text else "")
     conversation = await load_agent_conversation(db, ctx, agent.id, body.conversation_id)
     history = (conversation.messages_json if conversation else body.conversation)[-20:]
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
@@ -3301,7 +3318,7 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
                 stream_usage["total_tokens"] = stream_usage.get("prompt_tokens", 0) + stream_usage.get("completion_tokens", 0)
 
         try:
-            async for item in stream_agent_loop(db, messages, tenant_id=ctx.tenant_id, actor_id=ctx.user_id, config=config, preferred_provider_id=agent.provider_id):
+            async for item in stream_agent_loop(db, messages, tenant_id=ctx.tenant_id, actor_id=ctx.user_id, config=config, preferred_provider_id=agent.provider_id, response_format=openai_response_format(output_schema) if output_schema else None):
                 kind = item.get("type")
                 if kind == "token":
                     stream_text += item["text"]
@@ -3314,11 +3331,17 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
                     yield sse(kind, {key: value for key, value in item.items() if key != "type"})
                 elif kind == "final":
                     completed = True
+                    structured_output = None
+                    if output_schema:
+                        try:
+                            structured_output = parse_structured_output(item.get("text", ""), output_schema)
+                        except StructuredOutputError as exc:
+                            raise RuntimeError(str(exc)) from exc
                     usage = item.get("usage") or {}
                     total_tokens = int(usage.get("total_tokens", 0))
                     cost_center = await resolve_cost_center(db, ctx.tenant_id, agent.project_id, body.cost_center, "agent")
                     db.add(ComputeUsage(tenant_id=ctx.tenant_id, cost_center=cost_center, tokens=total_tokens))
-                    event = AgentEvent(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, event_type="message", tokens=total_tokens, latency_ms=int((time.perf_counter() - started) * 1000), detail_json={"provider_id": item.get("provider_id"), "model": item.get("model"), "tool_trace": item.get("tool_trace", []), "tool_rounds": item.get("tool_rounds", 0), "stream": True})
+                    event = AgentEvent(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, event_type="message", tokens=total_tokens, latency_ms=int((time.perf_counter() - started) * 1000), detail_json={"provider_id": item.get("provider_id"), "model": item.get("model"), "tool_trace": item.get("tool_trace", []), "tool_rounds": item.get("tool_rounds", 0), "stream": True, "citations": citations, "structured_output": bool(output_schema)})
                     db.add(event)
                     if not conversation:
                         conversation = AgentConversation(tenant_id=ctx.tenant_id, agent_id=agent.id, user_id=ctx.user_id, title=user_message[:160])
@@ -3327,7 +3350,7 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
                     await audit(db, ctx, "agent.chat.stream", "agent", agent.id, {"usage": usage, "tool_rounds": item.get("tool_rounds", 0)})
                     await db.commit()
                     await db.flush()
-                    yield sse("done", {"agent_id": agent.id, "event_id": event.id, "conversation_id": conversation.id, "text": item.get("text", ""), "usage": usage, "tool_trace": item.get("tool_trace", [])})
+                    yield sse("done", {"agent_id": agent.id, "event_id": event.id, "conversation_id": conversation.id, "text": item.get("text", ""), "structured_output": structured_output, "citations": citations, "usage": usage, "tool_trace": item.get("tool_trace", [])})
         except asyncio.CancelledError:
             # A client disconnect must still leave an auditable usage record.
             if not completed:

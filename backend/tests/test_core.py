@@ -3,9 +3,10 @@ import pytest
 
 from app.services.evaluation import parse_judge_result
 from app.services.identity import claim_values, mapped_role, parse_role_mapping
-from app.services.knowledge import normalize_metadata_filter, rerank_candidates
+from app.services.knowledge import format_citation_context, normalize_metadata_filter, rerank_candidates
 from app.services.rate_limit import allow_local, clear_local
 from app.services.storage import object_key
+from app.services.structured_output import StructuredOutputError, normalize_output_schema, openai_response_format, parse_structured_output
 from app.services.workflow import fair_order_messages, ordered_nodes, resolve
 
 
@@ -65,6 +66,24 @@ def test_rag_metadata_filter_is_allowlisted_and_bounded():
         normalize_metadata_filter({"source": list(range(21))})
     with pytest.raises(ValueError, match="scalar"):
         normalize_metadata_filter({"source": [{"secret": "value"}]})
+
+
+def test_rag_context_emits_stable_citations_and_markers():
+    context, citations = format_citation_context([
+        {"chunk_id": "chunk-1", "document_id": "doc-1", "content": "设备手册", "score": 0.8, "source": "keyword"},
+        {"chunk_id": "chunk-2", "document_id": "doc-1", "content": "维护步骤", "score": 0.6, "source": "hybrid"},
+    ])
+    assert "[citation:1] 设备手册" in context
+    assert [item["index"] for item in citations] == [1, 2]
+    assert citations[1]["document_id"] == "doc-1"
+
+
+def test_structured_output_validates_schema_and_builds_provider_format():
+    schema = normalize_output_schema({"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]})
+    assert openai_response_format(schema)["type"] == "json_schema"
+    assert parse_structured_output('{"answer":"ok"}', schema) == {"answer": "ok"}
+    with pytest.raises(StructuredOutputError, match="缺少字段"):
+        parse_structured_output("{}", schema)
 
 
 def test_worker_fair_order_round_robins_tenants_and_respects_priority():

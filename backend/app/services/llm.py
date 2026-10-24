@@ -69,6 +69,7 @@ async def call_routed_chat(
     temperature: float = 0.2,
     max_tokens: int | None = None,
     tools: list[dict[str, Any]] | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     providers = (await db.execute(select(ModelProvider).where(ModelProvider.tenant_id == tenant_id, ModelProvider.enabled.is_(True)))).scalars().all()
     if preferred_provider_id:
@@ -102,6 +103,7 @@ async def call_routed_chat(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tools=tools,
+                response_format=response_format,
             )
             await _breaker_record(tenant_id, provider.id, True)
             return {**result, "provider_id": provider.id, "model": model if provider.id == preferred_provider_id and model else provider.default_model}
@@ -125,6 +127,7 @@ async def call_chat(
     temperature: float = 0.2,
     max_tokens: int | None = None,
     tools: list[dict[str, Any]] | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not provider.enabled:
         raise RuntimeError("模型提供商已禁用")
@@ -144,6 +147,8 @@ async def call_chat(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    if response_format:
+        payload["response_format"] = response_format
     try:
         async with httpx.AsyncClient(timeout=get_settings().model_timeout_seconds) as client:
             for attempt in range(3):
@@ -187,6 +192,7 @@ async def stream_chat(
     temperature: float = 0.2,
     max_tokens: int | None = None,
     tools: list[dict[str, Any]] | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream an OpenAI-compatible chat response as normalized events."""
     if not provider.enabled:
@@ -209,6 +215,8 @@ async def stream_chat(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    if response_format:
+        payload["response_format"] = response_format
 
     try:
         async with httpx.AsyncClient(timeout=get_settings().model_timeout_seconds) as client:
@@ -255,6 +263,7 @@ async def stream_routed_chat(
     temperature: float = 0.2,
     max_tokens: int | None = None,
     tools: list[dict[str, Any]] | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Route a streaming request using the same tenant/provider policy as chat."""
     providers = (await db.execute(select(ModelProvider).where(ModelProvider.tenant_id == tenant_id, ModelProvider.enabled.is_(True)))).scalars().all()
@@ -293,6 +302,7 @@ async def stream_routed_chat(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tools=tools,
+                response_format=response_format,
             ):
                 emitted = True
                 yield {**event, "provider_id": provider.id, "model": model if provider.id == preferred_provider_id and model else provider.default_model}

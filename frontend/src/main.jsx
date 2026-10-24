@@ -226,10 +226,10 @@ function Overview({ data, go }) {
 
 function Agents({ data, refresh }) {
   const [toolTrace, setToolTrace] = useState([]); const [streaming, setStreaming] = useState(false); const abortRef = useRef(null);
-  const [agents, setAgents] = useState(data.agents || []); const [selected, setSelected] = useState(""); const [message, setMessage] = useState(""); const [answer, setAnswer] = useState(""); const [conversationId, setConversationId] = useState("");
+  const [agents, setAgents] = useState(data.agents || []); const [selected, setSelected] = useState(""); const [message, setMessage] = useState(""); const [answer, setAnswer] = useState(""); const [conversationId, setConversationId] = useState(""); const [citations, setCitations] = useState([]);
   const [workspaces, setWorkspaces] = useState([]); const [importFile, setImportFile] = useState(null);
   const [form, setForm] = useState({ name: "企业智能助手", slug: `assistant-${Date.now()}`, description: "面向企业员工的知识问答助手", system_prompt: "你是一名企业智能助手，请基于企业知识和权限边界回答问题。", provider_id: "", knowledge_base_id: "", workspace_id: "", agent_type: "chat" }); const [question, setQuestion] = useState("");
-  useEffect(() => { abortRef.current?.abort(); abortRef.current = null; setStreaming(false); setConversationId(""); setAnswer(""); setToolTrace([]); }, [selected]);
+  useEffect(() => { abortRef.current?.abort(); abortRef.current = null; setStreaming(false); setConversationId(""); setAnswer(""); setToolTrace([]); setCitations([]); }, [selected]);
   useEffect(() => () => abortRef.current?.abort(), []);
   async function reload() { try { const res = await api.get("/api/agents"); setAgents(res.data); } catch (err) { setMessage(errorText(err, "Agent 列表读取失败")); } }
   useEffect(() => { reload(); api.get("/api/workspaces").then((res) => { setWorkspaces(res.data); if (!form.workspace_id && res.data[0]) setForm((current) => ({ ...current, workspace_id: res.data[0].id })); }).catch(() => {}); }, []);
@@ -240,7 +240,7 @@ function Agents({ data, refresh }) {
     if (streaming) return;
     setStreaming(true); setToolTrace([]);
     const controller = new AbortController(); abortRef.current = controller;
-    setMessage(""); setAnswer("");
+    setMessage(""); setAnswer(""); setCitations([]);
     try {
       const response = await fetch(`/api/agents/${selected}/chat/stream`, { method: "POST", credentials: "include", signal: controller.signal, headers: { "Content-Type": "application/json", "X-CSRF-Token": browserCsrfToken() }, body: JSON.stringify({ message: question, conversation_id: conversationId || null }) });
       if (!response.ok) { let detail = "Agent 调用失败，请先配置模型"; try { const payload = await response.json(); detail = payload.detail?.message || payload.detail || detail; } catch (_) {} throw new Error(detail); }
@@ -250,7 +250,7 @@ function Agents({ data, refresh }) {
         if (event === "token") { text += payload.text || ""; setAnswer(text); }
         if (event === "tool_call") { setToolTrace((items) => [...items, { type: event, ...payload }]); setMessage(`正在调用工具：${payload.name || "未命名工具"}`); }
         if (event === "tool_result") { setToolTrace((items) => [...items, { type: event, ...payload }]); }
-        if (event === "done") { setConversationId(payload.conversation_id || ""); setAnswer(payload.text || text); setMessage("Agent 已完成"); }
+        if (event === "done") { setConversationId(payload.conversation_id || ""); setAnswer(payload.text || text); setCitations(Array.isArray(payload.citations) ? payload.citations : []); setMessage("Agent 已完成"); }
         if (event === "error") throw new Error(payload.message || "Agent 流式调用失败");
       });
       while (true) {
