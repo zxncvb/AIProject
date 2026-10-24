@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
@@ -178,7 +178,7 @@ from .schemas import (
 )
 from .security import create_access_token, create_refresh_token, decode_access_token, decode_refresh_token, decrypt_secret, encrypt_secret, hash_password, secret_backend_status, verify_password
 from .services.auth_sessions import clear_login_failures, consume_email_verification, consume_password_reset, create_email_verification, create_password_reset, is_login_locked, is_token_revoked, record_login_failure, revoke_token, revoke_user_sessions
-from .services.crypto import checksum, chunk_text
+from .services.crypto import checksum, chunk_text_configured
 from .services.conversation_context import compress_history
 from .services.knowledge import format_citation_context, normalize_metadata_filter, search_chunks
 from .services.structured_output import StructuredOutputError, normalize_output_schema, openai_response_format, parse_structured_output
@@ -4119,7 +4119,16 @@ async def grant_kb_access(kb_id: str, body: KnowledgeBaseAccessCreate, ctx: Admi
 
 
 @app.post("/api/knowledge-bases/{kb_id}/documents")
-async def upload_document(kb_id: str, ctx: EditorContext, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+async def upload_document(
+    kb_id: str,
+    ctx: EditorContext,
+    file: UploadFile = File(...),
+    chunking_mode: str = Form("auto"),
+    chunk_size: int = Form(1200),
+    chunk_overlap: int = Form(160),
+    chunk_separator: str = Form("\\n\\n"),
+    db: AsyncSession = Depends(get_db),
+):
     kb = await db.scalar(select(KnowledgeBase).where(KnowledgeBase.id == kb_id, KnowledgeBase.tenant_id == ctx.tenant_id))
     if not kb:
         raise HTTPException(status_code=404, detail="知识库不存在")
@@ -4131,6 +4140,12 @@ async def upload_document(kb_id: str, ctx: EditorContext, file: UploadFile = Fil
     raw = await file.read(settings.upload_max_bytes + 1)
     if len(raw) > settings.upload_max_bytes:
         raise HTTPException(status_code=413, detail=f"文件超过上传上限 {settings.upload_max_bytes // 1024 // 1024} MB")
+    if chunking_mode not in {"auto", "custom"}:
+        raise HTTPException(status_code=422, detail="分段模式只能是 auto 或 custom")
+    if not 200 <= chunk_size <= 8000 or not 0 <= chunk_overlap < chunk_size:
+        raise HTTPException(status_code=422, detail="分段长度必须在 200-8000 之间，重叠长度必须小于分段长度")
+    if chunking_mode == "custom" and not chunk_separator.strip():
+        raise HTTPException(status_code=422, detail="自定义分段符不能为空")
     document_checksum = checksum(raw)
     duplicate = await db.scalar(select(Document).where(Document.kb_id == kb.id, Document.tenant_id == ctx.tenant_id, Document.checksum == document_checksum))
     if duplicate:
@@ -4146,6 +4161,8 @@ async def upload_document(kb_id: str, ctx: EditorContext, file: UploadFile = Fil
     except Exception as exc:
         logger.exception("document artifact storage failed")
         raise HTTPException(status_code=503, detail=f"原始文件存储失败: {type(exc).__name__}") from exc
+    normalized_separator = chunk_separator.replace("\\n", "\n")[:32]
+    chunking = {"mode": chunking_mode, "size": chunk_size, "overlap": chunk_overlap, "separator": normalized_separator}
     document = Document(
         tenant_id=ctx.tenant_id,
         kb_id=kb.id,
@@ -4158,7 +4175,7 @@ async def upload_document(kb_id: str, ctx: EditorContext, file: UploadFile = Fil
         file_size=len(raw),
         extraction_method=extraction_method,
         security_status=inspection.status,
-        security_report_json=inspection.payload(),
+        security_report_json={**inspection.payload(), "chunking": chunking},
         storage_key=storage_key,
         storage_backend=storage_backend,
         created_by=ctx.user_id,
@@ -4166,7 +4183,7 @@ async def upload_document(kb_id: str, ctx: EditorContext, file: UploadFile = Fil
     db.add(document)
     await db.flush()
     chunks = []
-    for index, piece in enumerate(chunk_text(content)):
+    for index, piece in enumerate(chunk_text_configured(content, mode=chunking_mode, size=chunk_size, overlap=chunk_overlap, separator=normalized_separator)):
         chunk = DocumentChunk(tenant_id=ctx.tenant_id, kb_id=kb.id, document_id=document.id, chunk_index=index, content=piece)
         db.add(chunk)
         chunks.append(chunk)
@@ -4174,14 +4191,15 @@ async def upload_document(kb_id: str, ctx: EditorContext, file: UploadFile = Fil
     await audit(db, ctx, "knowledge.document.upload", "document", document.id, {"kb_id": kb.id, "filename": file.filename, "extraction_method": extraction_method, "security_status": inspection.status})
     await db.commit()
     await enqueue_index(document.id)
-    return {"id": document.id, "kb_id": kb.id, "title": document.title, "status": document.status, "checksum": document.checksum, "extraction_method": extraction_method, "security_status": inspection.status, "security_report": inspection.payload(), "storage_backend": storage_backend, "vector_indexed": 0, "index_queued": True}
+    return {"id": document.id, "kb_id": kb.id, "title": document.title, "status": document.status, "checksum": document.checksum, "extraction_method": extraction_method, "security_status": inspection.status, "security_report": {**inspection.payload(), "chunking": chunking}, "chunk_count": len(chunks), "storage_backend": storage_backend, "vector_indexed": 0, "index_queued": True}
 
 
 @app.get("/api/knowledge-bases/{kb_id}/documents")
 async def list_documents(kb_id: str, ctx: Context, db: AsyncSession = Depends(get_db)):
     await require_kb_access(kb_id, ctx, db)
     rows = (await db.execute(select(Document).where(Document.kb_id == kb_id, Document.tenant_id == ctx.tenant_id).order_by(Document.created_at.desc()))).scalars().all()
-    return [{"id": row.id, "kb_id": row.kb_id, "title": row.title, "source": row.source, "checksum": row.checksum, "status": row.status, "mime_type": row.mime_type, "file_size": row.file_size, "extraction_method": row.extraction_method, "security_status": row.security_status, "security_report": row.security_report_json, "storage_backend": row.storage_backend, "created_at": row.created_at} for row in rows]
+    chunk_counts = dict((await db.execute(select(DocumentChunk.document_id, func.count(DocumentChunk.id)).where(DocumentChunk.kb_id == kb_id, DocumentChunk.tenant_id == ctx.tenant_id).group_by(DocumentChunk.document_id))).all())
+    return [{"id": row.id, "kb_id": row.kb_id, "title": row.title, "source": row.source, "checksum": row.checksum, "status": row.status, "mime_type": row.mime_type, "file_size": row.file_size, "extraction_method": row.extraction_method, "security_status": row.security_status, "security_report": row.security_report_json, "chunking": (row.security_report_json or {}).get("chunking", {"mode": "auto", "size": 1200, "overlap": 160}), "chunk_count": int(chunk_counts.get(row.id, 0)), "storage_backend": row.storage_backend, "created_at": row.created_at} for row in rows]
 
 
 @app.get("/api/documents/{document_id}/download-url")

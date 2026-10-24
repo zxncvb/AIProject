@@ -5,6 +5,7 @@ from app.services.evaluation import parse_judge_result
 from app.services.identity import claim_values, mapped_role, parse_role_mapping
 from app.services.knowledge import format_citation_context, normalize_metadata_filter, rerank_candidates
 from app.services.conversation_context import compress_history
+from app.services.crypto import chunk_text_configured
 from app.services.rate_limit import allow_local, clear_local
 from app.services.storage import object_key
 from app.services.structured_output import StructuredOutputError, normalize_output_schema, openai_response_format, parse_structured_output
@@ -93,6 +94,14 @@ def test_conversation_context_keeps_recent_turns_and_compresses_old_history():
     assert compact[0]["role"] == "system"
     assert "compressed" in compact[0]["content"]
     assert compact[-1]["content"].startswith("old-5")
+
+
+def test_knowledge_chunking_supports_auto_and_custom_modes():
+    text = "标题一\n正文一\n\n标题二\n正文二\n\n标题三\n正文三"
+    auto = chunk_text_configured(text, mode="auto", size=20, overlap=3)
+    custom = chunk_text_configured(text, mode="custom", size=20, overlap=3, separator="\n\n")
+    assert auto and custom
+    assert any("标题二" in item for item in custom)
 
 
 def test_worker_fair_order_round_robins_tenants_and_respects_priority():
