@@ -212,6 +212,7 @@ function Layout({ me, page, setPage, onLogout, children }) {
 
 function PageTitle({ title, description, actions }) { return <div className="page-title"><div><h1>{title}</h1><p>{description}</p></div><div className="page-actions">{actions}</div></div>; }
 function Panel({ title, subtitle, children, actions, className = "" }) { return <section className={`panel ${className}`}><div className="panel-head"><div><h3>{title}</h3>{subtitle && <small>{subtitle}</small>}</div>{actions}</div>{children}</section>; }
+function Modal({ title, children, onClose, className = "" }) { return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className={`modal-card ${className}`} role="dialog" aria-modal="true" aria-label={title}><div className="modal-head"><h2>{title}</h2><button type="button" className="modal-close" aria-label="关闭" onClick={onClose}>×</button></div>{children}</section></div>; }
 function Stat({ label, value, detail, tone = "blue" }) { return <div className={`stat ${tone}`}><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>; }
 function StatusTag({ value, tone }) { return <span className={`tag ${tone || (value === "已发布" || value === "已通过" || value === "已就绪" ? "green" : value === "待审批" || value === "索引中" ? "yellow" : "")}`}>{statusLabels[value] || value || "未知"}</span>; }
 function Empty({ text }) { return <div className="empty">{text}</div>; }
@@ -225,6 +226,76 @@ function Overview({ data, go }) {
 }
 
 function Agents({ data, refresh }) {
+  const [agents, setAgents] = useState(data.agents || []);
+  const [workspaces, setWorkspaces] = useState([]);
+  const [selected, setSelected] = useState("");
+  const [message, setMessage] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [question, setQuestion] = useState("");
+  const [toolTrace, setToolTrace] = useState([]);
+  const [citations, setCitations] = useState([]);
+  const [conversationId, setConversationId] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState(null);
+  const abortRef = useRef(null);
+  const [form, setForm] = useState({ name: "企业智能助手", slug: `assistant-${Date.now()}`, description: "面向企业员工的知识问答助手", system_prompt: "你是一名企业智能助手，请基于企业知识和权限边界回答问题。", provider_id: "", knowledge_base_id: "", workspace_id: "", agent_type: "chat" });
+
+  async function reload() { try { const res = await api.get("/api/agents"); setAgents(res.data); } catch (err) { setMessage(errorText(err, "Agent 列表读取失败")); } }
+  useEffect(() => { reload(); api.get("/api/workspaces").then((res) => { setWorkspaces(res.data); if (!form.workspace_id && res.data[0]) setForm((current) => ({ ...current, workspace_id: res.data[0].id })); }).catch(() => {}); }, []);
+  useEffect(() => { abortRef.current?.abort(); abortRef.current = null; setStreaming(false); setConversationId(""); setAnswer(""); setToolTrace([]); setCitations([]); }, [selected]);
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  async function create(event) {
+    event.preventDefault();
+    try {
+      const res = await api.post("/api/agents", { ...form, project_id: data.projects[0]?.id, provider_id: form.provider_id || null, knowledge_base_id: form.knowledge_base_id || null, workspace_id: form.workspace_id || null });
+      await api.patch(`/api/agents/${res.data.id}/config`, { agent_type: form.agent_type, workspace_id: form.workspace_id || null, prompt_template: form.system_prompt, variables: [], memory: {}, capabilities: {}, experience: {}, safety: {} });
+      setSelected(res.data.id); setCreateOpen(false); setMessage("Agent 已创建并完成基础配置"); await reload(); await refresh();
+    } catch (err) { setMessage(errorText(err, "Agent 创建失败")); }
+  }
+  async function importAgent(event) {
+    event.preventDefault();
+    if (!importFile) return;
+    try { const payload = JSON.parse(await importFile.text()); await api.post("/api/agents/import", { ...payload, project_id: data.projects[0]?.id }); setImportFile(null); setImportOpen(false); setMessage("Agent 已导入"); await reload(); await refresh(); } catch (err) { setMessage(errorText(err, "Agent 导入失败，请检查 JSON 文件")); }
+  }
+  async function removeAgent(agent) { if (window.prompt("请输入智能体名称，以确认删除") !== agent.name) return; try { await api.delete(`/api/agents/${agent.id}`); if (selected === agent.id) { setSelected(""); setAnswer(""); } setMessage(`Agent「${agent.name}」已删除`); await reload(); await refresh(); } catch (err) { setMessage(errorText(err, "Agent 删除失败")); } }
+  async function chat() {
+    if (streaming) return;
+    setStreaming(true); setToolTrace([]); setCitations([]); setMessage(""); setAnswer("");
+    const controller = new AbortController(); abortRef.current = controller;
+    try {
+      const response = await fetch(`/api/agents/${selected}/chat/stream`, { method: "POST", credentials: "include", signal: controller.signal, headers: { "Content-Type": "application/json", "X-CSRF-Token": browserCsrfToken() }, body: JSON.stringify({ message: question, conversation_id: conversationId || null }) });
+      if (!response.ok) { let detail = "Agent 调用失败，请先配置模型"; try { const payload = await response.json(); detail = payload.detail?.message || payload.detail || detail; } catch (_) {} throw new Error(detail); }
+      if (!response.body) throw new Error("Agent 流式响应不可用");
+      const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ""; let text = "";
+      const handleEvents = (events) => events.forEach(({ event, payload }) => {
+        if (event === "token") { text += payload.text || ""; setAnswer(text); }
+        if (event === "tool_call") { setToolTrace((items) => [...items, { type: event, ...payload }]); setMessage(`正在调用工具：${payload.name || "未命名工具"}`); }
+        if (event === "tool_result") setToolTrace((items) => [...items, { type: event, ...payload }]);
+        if (event === "done") { setConversationId(payload.conversation_id || ""); setAnswer(payload.text || text); setCitations(Array.isArray(payload.citations) ? payload.citations : []); setMessage("Agent 已完成"); }
+        if (event === "error") throw new Error(payload.message || "Agent 流式调用失败");
+      });
+      while (true) { const { value, done } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); const parsed = parseAgentSseFrames(buffer); buffer = parsed.buffer; handleEvents(parsed.events); }
+      buffer += decoder.decode(); handleEvents(parseAgentSseFrames(buffer, true).events); setQuestion("");
+    } catch (err) { setMessage(err.name === "AbortError" ? "Agent 流式请求已取消" : (err.message || "Agent 调用失败")); } finally { setStreaming(false); abortRef.current = null; }
+  }
+  function cancelChat() { abortRef.current?.abort(); }
+  const selectedAgent = agents.find((agent) => agent.id === selected);
+  return <div className="page">
+    <PageTitle title="Agent 中心" description="创建、配置、测试和发布可复用的企业智能体。" actions={<><button onClick={() => setImportOpen(true)}>导入 Agent</button><button className="primary" onClick={() => setCreateOpen(true)}>+ 创建 Agent</button></>}/>
+    <div className="feature-strip agent-feature-strip"><div><b>本地 Agent</b><small>{agents.length} 个可复用智能体</small></div><div><b>知识增强</b><small>绑定企业知识库和访问权限</small></div><div><b>工具治理</b><small>插件、Skill、MCP 审批后调用</small></div><div><b>运行可追溯</b><small>流式输出、工具轨迹和反馈</small></div></div>
+    <div className="sub-tabs"><button className="active">本地 Agent <b>{agents.length}</b></button><button>A2A 服务 <b>0</b></button><div className="table-tools"><input placeholder="搜索 Agent"/><button>筛选</button></div></div>
+    <div className="agent-layout"><Panel title="Agent 资产" subtitle="选择一个智能体进入测试工作台" className="asset-panel"><div className="card-grid">{agents.map((agent) => <article className={`asset-card ${selected === agent.id ? "selected" : ""}`} key={agent.id} role="button" tabIndex={0} onClick={() => setSelected(agent.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setSelected(agent.id); }}><div className="asset-icon">✦</div><div className="asset-card-body"><div className="card-title"><b>{agent.name}</b><button type="button" className="delete-button asset-delete" onClick={(event) => { event.stopPropagation(); removeAgent(agent); }}>删除</button></div><p>{agent.description || "企业智能助手"}</p><small>v{agent.version || 1} · {agent.provider_id ? "已绑定模型" : "未绑定模型"}</small><div><StatusTag value={agent.enabled ? "已就绪" : "已停用"}/></div></div></article>)}</div>{!agents.length && <Empty text="还没有 Agent，请点击右上角创建。"/>}</Panel>
+      <Panel title="测试工作台" subtitle={selectedAgent ? `${selectedAgent.name} · ${selectedAgent.agent_type || "对话型"}` : "先选择一个 Agent"} className="agent-editor"><div className="chat-box"><div className="section-label">实时对话 {selected ? "· 已选择 Agent" : "· 请先选择 Agent"}</div><div className="search-row"><input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="例如：公司差旅报销标准是什么？"/><button disabled={!selected || !question.trim()} onClick={streaming ? cancelChat : chat}>{streaming ? "取消" : "发送"}</button></div>{toolTrace.length > 0 && <div className="tool-trace"><div className="section-label">工具调用轨迹</div>{toolTrace.map((item, index) => <div className="tool-trace-item" key={`${item.type}-${item.id || item.name || index}`}><span>{item.type === "tool_call" ? "调用" : "结果"}</span><b>{item.name || "未命名工具"}</b><small>{item.status || "已完成"}</small></div>)}</div>}{answer && <article className="answer"><b>Agent 回复</b><p>{answer}</p>{citations.length > 0 && <div className="citation-list"><small>知识来源</small>{citations.map((citation) => <span key={`${citation.index}-${citation.chunk_id || citation.document_id}`}>[{citation.index}] {citation.source || citation.document_id || citation.chunk_id}</span>)}</div>}</article>}{!answer && <div className="chat-placeholder">发送问题后，在这里查看流式回答、工具轨迹和知识引用。</div>}</div></Panel>
+    </div>{message && <div className="notice">{message}</div>}
+    {createOpen && <Modal title="创建智能体" onClose={() => setCreateOpen(false)} className="modal-wide"><form className="modal-form" onSubmit={create}><div className="agent-type-grid"><label className={form.agent_type === "chat" ? "selected" : ""}><input type="radio" checked={form.agent_type === "chat"} onChange={() => setForm({ ...form, agent_type: "chat" })}/><b>对话型</b><small>一问一答，适合企业知识问答和日常助手。</small></label><label className={form.agent_type === "chatflow" ? "selected" : ""}><input type="radio" checked={form.agent_type === "chatflow"} onChange={() => setForm({ ...form, agent_type: "chatflow" })}/><b>对话流型</b><small>连续对话并结合工具、知识和工作流。</small></label></div><div className="modal-form-grid"><label>工作空间<select value={form.workspace_id} onChange={(event) => setForm({ ...form, workspace_id: event.target.value })}><option value="">不指定工作空间</option>{workspaces.map((space) => <option value={space.id} key={space.id}>{space.name}</option>)}</select></label><label>模型提供商<select value={form.provider_id} onChange={(event) => setForm({ ...form, provider_id: event.target.value })}><option value="">自动选择已启用模型</option>{data.models.map((model) => <option value={model.id} key={model.id}>{model.name} / {model.default_model}</option>)}</select></label><label>名称<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required maxLength={128}/></label><label>唯一标识<input value={form.slug} onChange={(event) => setForm({ ...form, slug: event.target.value })} required/></label><label>知识库<select value={form.knowledge_base_id} onChange={(event) => setForm({ ...form, knowledge_base_id: event.target.value })}><option value="">不绑定知识库</option>{data.kbs.map((kb) => <option value={kb.id} key={kb.id}>{kb.name}</option>)}</select></label><label>功能说明<input value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })}/></label></div><label>系统提示词<textarea value={form.system_prompt} onChange={(event) => setForm({ ...form, system_prompt: event.target.value })} required/></label><div className="modal-actions"><button type="button" onClick={() => setCreateOpen(false)}>取消</button><button className="primary">创建</button></div></form></Modal>}
+    {importOpen && <Modal title="导入智能体" onClose={() => setImportOpen(false)}><form className="modal-form" onSubmit={importAgent}><div className="upload-dropzone"><input id="agent-import-file" type="file" accept=".json,application/json" onChange={(event) => setImportFile(event.target.files?.[0] || null)}/><label htmlFor="agent-import-file"><b>选择 Agent JSON 文件</b><small>{importFile ? importFile.name : "支持导入已导出的企业智能体配置"}</small></label></div><div className="modal-actions"><button type="button" onClick={() => setImportOpen(false)}>取消</button><button className="primary" disabled={!importFile}>导入</button></div></form></Modal>}
+  </div>;
+}
+
+function AgentsLegacy({ data, refresh }) {
   const [toolTrace, setToolTrace] = useState([]); const [streaming, setStreaming] = useState(false); const abortRef = useRef(null);
   const [agents, setAgents] = useState(data.agents || []); const [selected, setSelected] = useState(""); const [message, setMessage] = useState(""); const [answer, setAnswer] = useState(""); const [conversationId, setConversationId] = useState(""); const [citations, setCitations] = useState([]);
   const [workspaces, setWorkspaces] = useState([]); const [importFile, setImportFile] = useState(null);
@@ -311,6 +382,52 @@ function Models({ data, refresh }) {
 function ComputeQuota() { const [quota, setQuota] = useState(null); const [message, setMessage] = useState(""); useEffect(() => { api.get("/api/compute/quota").then((res) => setQuota(res.data)).catch((err) => setMessage(errorText(err, "配额读取失败"))); }, []); async function save(event) { event.preventDefault(); try { await api.put("/api/compute/quota", quota); setMessage("算力配额已保存"); } catch (err) { setMessage(errorText(err, "配额保存失败")); } } if (!quota) return <Panel title="算力配额" subtitle={message || "正在读取租户配额…"} />; return <Panel title="算力配额" subtitle="租户级 CPU、内存、GPU、并发和 Token 限额"><form className="quota-grid" onSubmit={save}><label>CPU 毫核<input type="number" min="100" value={quota.cpu_millicores} onChange={(e) => setQuota({ ...quota, cpu_millicores: Number(e.target.value) })}/></label><label>内存 MB<input type="number" min="128" value={quota.memory_mb} onChange={(e) => setQuota({ ...quota, memory_mb: Number(e.target.value) })}/></label><label>并发运行数<input type="number" min="1" value={quota.concurrent_runs} onChange={(e) => setQuota({ ...quota, concurrent_runs: Number(e.target.value) })}/></label><label>GPU 数量<input type="number" min="0" value={quota.gpu_count} onChange={(e) => setQuota({ ...quota, gpu_count: Number(e.target.value) })}/></label><label>月 Token 配额<input type="number" min="1000" value={quota.monthly_tokens} onChange={(e) => setQuota({ ...quota, monthly_tokens: Number(e.target.value) })}/></label><label><input type="checkbox" checked={Boolean(quota.enabled)} onChange={(e) => setQuota({ ...quota, enabled: e.target.checked })}/> 启用算力配额</label><button className="primary">保存配额</button></form>{message && <div className="notice">{message}</div>}</Panel>; }
 
 function Knowledge({ data, refresh }) {
+  const [selected, setSelected] = useState(data.kbs[0]?.id || "");
+  const [tab, setTab] = useState("files");
+  const [kbName, setKbName] = useState("");
+  const [kbDescription, setKbDescription] = useState("企业知识空间");
+  const [file, setFile] = useState(null);
+  const [documents, setDocuments] = useState([]);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [message, setMessage] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadReport, setUploadReport] = useState(null);
+  const currentKb = data.kbs.find((kb) => kb.id === selected);
+
+  async function loadDocs(id = selected) { if (!id) return; try { const res = await api.get(`/api/knowledge-bases/${id}/documents`); setDocuments(res.data); } catch (err) { setMessage(errorText(err, "文档读取失败")); } }
+  useEffect(() => { if (data.kbs.length && (!selected || !data.kbs.some((item) => item.id === selected))) setSelected(data.kbs[0].id); }, [data.kbs, selected]);
+  useEffect(() => { loadDocs(); }, [selected]);
+  function selectKnowledgeBase(kb) { setSelected(kb.id); setTab("files"); setResults([]); setMessage(`已打开“${kb.name}”`); loadDocs(kb.id); }
+  async function renameKnowledgeBase(kb) { const name = window.prompt("请输入新的知识库名称", kb.name)?.trim(); if (!name || name === kb.name) return; try { await api.patch(`/api/knowledge-bases/${kb.id}`, { name }); setMessage("知识库已改名"); await refresh(); } catch (err) { setMessage(errorText(err, "知识库改名失败")); } }
+  async function create(event) {
+    event.preventDefault(); const name = kbName.trim();
+    if (!name || !data.projects[0]?.id) return;
+    const existing = data.kbs.find((item) => item.project_id === data.projects[0].id && item.name.trim().toLowerCase() === name.toLowerCase());
+    if (existing) { selectKnowledgeBase(existing); setCreateOpen(false); setMessage(`“${name}”已存在，已为你打开`); return; }
+    setCreating(true);
+    try { const res = await api.post("/api/knowledge-bases", { project_id: data.projects[0].id, name, description: kbDescription }); setSelected(res.data.id); setKbName(""); setCreateOpen(false); setMessage(`知识库“${name}”已创建`); await refresh(); } catch (err) { setMessage(errorText(err, "知识库创建失败")); } finally { setCreating(false); }
+  }
+  async function upload(event) {
+    event.preventDefault(); if (!file || !selected) return; setUploading(true); setUploadReport(null);
+    try { const body = new FormData(); body.append("file", file); const res = await api.post(`/api/knowledge-bases/${selected}/documents`, body); const report = res.data.security_report || {}; setUploadReport({ title: file.name, method: res.data.extraction_method || "文本解析", findings: report.dlp_findings?.length || 0, status: res.data.status || "ready" }); setMessage(`“${file.name}”已完成解析并建立索引`); setFile(null); setUploadOpen(false); await loadDocs(); } catch (err) { setMessage(errorText(err, "文档上传失败")); } finally { setUploading(false); }
+  }
+  async function search() { try { const res = await api.get(`/api/knowledge-bases/${selected}/search`, { params: { q: query, mode: "hybrid" } }); setResults(res.data.results || []); } catch (err) { setMessage(errorText(err, "检索失败")); } }
+  return <div className="page">
+    <PageTitle title="知识库" description="管理企业文档、解析任务、检索命中和知识访问权限。" actions={<button className="primary" type="button" onClick={() => setCreateOpen(true)}>+ 新建知识库</button>}/>
+    <div className="feature-strip"><div><b>文档解析</b><small>PDF、Office、文本、图片 OCR</small></div><div><b>安全处理</b><small>敏感信息扫描和权限隔离</small></div><div><b>混合检索</b><small>关键词、向量和重排结合</small></div><div><b>可追溯引用</b><small>Agent 回答返回知识来源</small></div></div>
+    <div className="knowledge-layout"><Panel title="知识库资产" subtitle={`${data.kbs.length} 个知识空间`}><div className="list">{data.kbs.map((kb) => <div className="list-item-row knowledge-list-row" key={kb.id}><button type="button" aria-pressed={selected === kb.id} className={`list-item ${selected === kb.id ? "selected" : ""}`} onClick={() => selectKnowledgeBase(kb)}><span className="list-icon">▤</span><span><b>{kb.name}</b><small>{kb.description || "企业知识空间"}</small></span></button><button type="button" className="knowledge-rename" onClick={() => renameKnowledgeBase(kb)}>改名</button></div>)}</div>{!data.kbs.length && <Empty text="还没有知识库，请点击右上角创建。"/>}</Panel>
+      <Panel title={currentKb?.name || "知识库详情"} subtitle={selected ? "文件、命中测试和配置" : "请选择左侧知识库"} className="knowledge-detail">{selected ? <><div className="knowledge-summary"><div><b>{currentKb?.name}</b><small>{documents.length} 个文档 · 当前租户授权范围</small></div><StatusTag value={documents.length ? "已就绪" : "待配置"}/></div><div className="sub-tabs detail-tabs"><button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>文件列表 <b>{documents.length}</b></button><button className={tab === "hit" ? "active" : ""} onClick={() => setTab("hit")}>命中测试</button><button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>设置详情</button></div>{tab === "files" && <><div className="detail-toolbar"><div><b>企业文档</b><small>上传后自动安全解析、切片并建立索引</small></div><button className="primary" onClick={() => setUploadOpen(true)}>上传文件</button></div>{uploadReport && <div className="upload-success"><b>最近上传：{uploadReport.title}</b><span>解析方式：{uploadReport.method} · {uploadReport.findings ? `发现 ${uploadReport.findings} 项敏感信息` : "未发现敏感信息"}</span></div>}<div className="table document-table"><div className="table-head"><span>文件名称</span><span>解析方式</span><span>安全状态</span><span>创建时间</span></div>{documents.map((doc) => <div className="table-row" key={doc.id}><b>{doc.title}</b><span>{doc.extraction_method || doc.source || "文本解析"}</span><StatusTag value={doc.security_status === "clean" ? "已就绪" : doc.security_status || doc.status}/><span>{formatDate(doc.created_at)}</span></div>)}</div>{!documents.length && <Empty text="还没有文档，请点击上传文件。"/>}</>}{tab === "hit" && <><div className="search-row"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入问题测试召回结果"/><button disabled={!query.trim()} onClick={search}>检索</button></div><div className="results">{results.map((item) => <article key={item.chunk_id}><span>相关度 {Number(item.score || 0).toFixed(3)} · {item.source || "hybrid"}</span><p>{item.content}</p></article>)}</div>{!results.length && <Empty text="输入问题后查看知识库命中片段。"/>}</>}{tab === "settings" && <div className="settings-grid"><div><b>检索模式</b><span>混合检索 + 向量召回 + 重排</span></div><div><b>访问范围</b><span>当前工作区与知识库授权</span></div><div><b>处理能力</b><span>PDF、Office、文本、图片 OCR、安全扫描与 DLP</span></div></div>}</> : <Empty text="请选择一个知识库查看详情。"/>}</Panel>
+    </div>{message && <div className="notice">{message}</div>}
+    {createOpen && <Modal title="创建知识库" onClose={() => setCreateOpen(false)}><form className="modal-form" onSubmit={create}><div className="step-indicator"><span className="active">1</span><b>基本配置</b><i></i><span>2</span><b>设置类型</b></div><label>知识库名称<input autoFocus value={kbName} onChange={(event) => setKbName(event.target.value)} placeholder="给知识库起一个名字吧" maxLength={128} required/></label><label>知识库描述<textarea value={kbDescription} onChange={(event) => setKbDescription(event.target.value)} placeholder="对该知识库进行描述，帮助团队理解内容范围"/></label><div className="modal-option selected"><input type="radio" checked readOnly/><div><b>标准知识库</b><small>管理平台里的企业知识库，支持文档解析和混合检索。</small></div></div><div className="modal-actions"><button type="button" onClick={() => setCreateOpen(false)}>取消</button><button className="primary" disabled={creating || !kbName.trim()}>{creating ? "创建中…" : "创建"}</button></div></form></Modal>}
+    {uploadOpen && <Modal title="上传并解析文件" onClose={() => { if (!uploading) setUploadOpen(false); }} className="modal-upload"><form className="modal-form" onSubmit={upload}><div className="upload-dropzone"><input id="knowledge-upload-file" type="file" accept=".txt,.md,.json,.csv,.log,.pdf,.docx,.xlsx,.xlsm,.png,.jpg,.jpeg,.webp,.tif,.tiff" onChange={(event) => setFile(event.target.files?.[0] || null)}/><label htmlFor="knowledge-upload-file"><b>{file ? file.name : "选择或拖拽文件到这里"}</b><small>{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB · 等待解析` : "支持 PDF、Word、Excel、Markdown、图片等企业资料"}</small></label></div><div className="format-list"><div><b>文档</b><span>pdf、doc、docx、ppt、pptx、xls、xlsx、txt、md、json</span></div><div><b>图片</b><span>png、jpg、jpeg、webp、tif、tiff</span></div></div><div className="modal-actions"><button type="button" disabled={uploading} onClick={() => setUploadOpen(false)}>取消</button><button className="primary" disabled={uploading || !file}>{uploading ? "解析中…" : "上传并解析"}</button></div></form></Modal>}
+  </div>;
+}
+
+function KnowledgeLegacy({ data, refresh }) {
   const [selected, setSelected] = useState(data.kbs[0]?.id || ""); const [tab, setTab] = useState("files"); const [kbName, setKbName] = useState(""); const [file, setFile] = useState(null); const [documents, setDocuments] = useState([]); const [query, setQuery] = useState(""); const [results, setResults] = useState([]); const [message, setMessage] = useState(""); const [creating, setCreating] = useState(false);
   async function loadDocs(id = selected) { if (!id) return; try { const res = await api.get(`/api/knowledge-bases/${id}/documents`); setDocuments(res.data); } catch (err) { setMessage(errorText(err, "文档读取失败")); } }
   useEffect(() => { if (data.kbs.length && (!selected || !data.kbs.some((item) => item.id === selected))) setSelected(data.kbs[0].id); }, [data.kbs, selected]); useEffect(() => { loadDocs(); }, [selected]);
