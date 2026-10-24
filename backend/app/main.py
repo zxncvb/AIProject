@@ -179,6 +179,7 @@ from .schemas import (
 from .security import create_access_token, create_refresh_token, decode_access_token, decode_refresh_token, decrypt_secret, encrypt_secret, hash_password, secret_backend_status, verify_password
 from .services.auth_sessions import clear_login_failures, consume_email_verification, consume_password_reset, create_email_verification, create_password_reset, is_login_locked, is_token_revoked, record_login_failure, revoke_token, revoke_user_sessions
 from .services.crypto import checksum, chunk_text
+from .services.conversation_context import compress_history
 from .services.knowledge import format_citation_context, normalize_metadata_filter, search_chunks
 from .services.structured_output import StructuredOutputError, normalize_output_schema, openai_response_format, parse_structured_output
 from .services.identity import BUILTIN_ROLES, mapped_role, parse_role_mapping
@@ -3177,7 +3178,9 @@ async def chat_agent(agent_id: str, body: AgentChatRequest, ctx: OperatorContext
     user_message = safety["text"] if policy.safety_json.get("mode") == "redact" else body.message
     system = render_agent_prompt(config, agent.system_prompt) + (f"\n\nEnterprise knowledge context:\n{context_text}\n\n引用规则：如使用知识库内容，请在回答中使用 [citation:N] 标记对应来源；不要编造不存在的引用。" if context_text else "")
     conversation = await load_agent_conversation(db, ctx, agent.id, body.conversation_id)
-    history = (conversation.messages_json if conversation else body.conversation)[-20:]
+    history_source = conversation.messages_json if conversation else body.conversation
+    memory_config = (config.memory_json if config else {}) or {}
+    history = compress_history(history_source, max_messages=memory_config.get("history_max_messages", 20), max_chars=memory_config.get("context_max_chars", 16000))
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
     started = time.perf_counter()
     memories = await load_agent_memories(db, ctx, agent.id, config)
@@ -3279,7 +3282,9 @@ async def stream_chat_agent(agent_id: str, body: AgentChatRequest, ctx: Operator
     user_message = safety["text"] if policy.safety_json.get("mode") == "redact" else body.message
     system = render_agent_prompt(config, agent.system_prompt) + (f"\n\nEnterprise knowledge context:\n{context_text}\n\n引用规则：如使用知识库内容，请在回答中使用 [citation:N] 标记对应来源；不要编造不存在的引用。" if context_text else "")
     conversation = await load_agent_conversation(db, ctx, agent.id, body.conversation_id)
-    history = (conversation.messages_json if conversation else body.conversation)[-20:]
+    history_source = conversation.messages_json if conversation else body.conversation
+    memory_config = (config.memory_json if config else {}) or {}
+    history = compress_history(history_source, max_messages=memory_config.get("history_max_messages", 20), max_chars=memory_config.get("context_max_chars", 16000))
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
     memories = await load_agent_memories(db, ctx, agent.id, config)
     if memories:
