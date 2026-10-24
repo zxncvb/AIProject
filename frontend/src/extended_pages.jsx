@@ -275,7 +275,9 @@ export function PlatformSettings({ data }) {
       const payload = { name: form.name, settings: { default_workspace_id: form.default_workspace_id || "", default_model_provider_id: form.default_model_provider_id || "", default_knowledge_base_id: form.default_knowledge_base_id || "", default_chunking_mode: form.default_chunking_mode, default_chunk_size: Number(form.default_chunk_size), default_chunk_overlap: Number(form.default_chunk_overlap), allow_user_agent_create: Boolean(form.allow_user_agent_create), allow_user_workflow_create: Boolean(form.allow_user_workflow_create), maintenance_mode: Boolean(form.maintenance_mode), welcome_message: form.welcome_message || "" } };
       const res = await api.patch("/api/admin/platform-settings", payload);
       const settings = res.data.settings || {};
-      setForm({ name: res.data.name || "", slug: res.data.slug || "", is_active: res.data.is_active !== false, ...settings });
+      const savedName = res.data.name || "";
+      setForm({ name: savedName, slug: res.data.slug || "", is_active: res.data.is_active !== false, ...settings });
+      window.dispatchEvent(new CustomEvent("tenant-name-change", { detail: { name: savedName } }));
       setMessage("平台设置已保存");
     } catch (err) { setMessage(errorText(err, "平台设置保存失败")); }
   }
