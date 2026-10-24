@@ -131,6 +131,7 @@ from .schemas import (
     ProviderCreate,
     ProviderUpdate,
     QuotaUpdate,
+    PlatformSettingsUpdate,
     TenantPolicyUpdate,
     TenantCreate,
     PublicAppInvokeRequest,
@@ -1314,6 +1315,90 @@ async def update_policy(body: TenantPolicyUpdate, ctx: AdminContext, db: AsyncSe
     await audit(db, ctx, "tenant.policy.update", "tenant_policy", row.id, {"safety": body.safety, "pricing": body.pricing})
     await db.commit()
     return {"tenant_id": ctx.tenant_id, "safety": row.safety_json, "pricing": row.pricing_json}
+
+
+PLATFORM_SETTINGS_DEFAULTS = {
+    "default_workspace_id": "",
+    "default_model_provider_id": "",
+    "default_knowledge_base_id": "",
+    "default_chunking_mode": "auto",
+    "default_chunk_size": 1200,
+    "default_chunk_overlap": 160,
+    "allow_user_agent_create": True,
+    "allow_user_workflow_create": True,
+    "maintenance_mode": False,
+    "welcome_message": "欢迎使用企业 AI 中台",
+}
+
+
+def platform_settings_payload(tenant: Tenant, policy: TenantPolicy) -> dict[str, Any]:
+    stored = (policy.pricing_json or {}).get("platform_settings") or {}
+    settings = {**PLATFORM_SETTINGS_DEFAULTS, **stored}
+    return {
+        "tenant_id": tenant.id,
+        "name": tenant.name,
+        "slug": tenant.slug,
+        "is_active": tenant.is_active,
+        "settings": settings,
+    }
+
+
+@app.get("/api/admin/platform-settings")
+async def get_platform_settings(ctx: AdminContext, db: AsyncSession = Depends(get_db)):
+    tenant = await db.scalar(select(Tenant).where(Tenant.id == ctx.tenant_id))
+    if not tenant:
+        raise HTTPException(status_code=404, detail="租户不存在")
+    policy = await tenant_policy(db, ctx.tenant_id)
+    await db.commit()
+    return platform_settings_payload(tenant, policy)
+
+
+@app.patch("/api/admin/platform-settings")
+async def update_platform_settings(body: PlatformSettingsUpdate, ctx: AdminContext, db: AsyncSession = Depends(get_db)):
+    tenant = await db.scalar(select(Tenant).where(Tenant.id == ctx.tenant_id))
+    if not tenant:
+        raise HTTPException(status_code=404, detail="租户不存在")
+    allowed = set(PLATFORM_SETTINGS_DEFAULTS)
+    invalid = sorted(set(body.settings) - allowed)
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"未知平台设置: {', '.join(invalid)}")
+    current = {**PLATFORM_SETTINGS_DEFAULTS, **((await tenant_policy(db, ctx.tenant_id)).pricing_json or {}).get("platform_settings", {})}
+    incoming = body.settings
+    if "default_chunking_mode" in incoming and incoming["default_chunking_mode"] not in {"auto", "custom"}:
+        raise HTTPException(status_code=422, detail="默认分段模式只能是 auto 或 custom")
+    if "default_chunk_size" in incoming:
+        try:
+            incoming_size = int(incoming["default_chunk_size"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="默认分段大小必须是整数") from exc
+        if not 200 <= incoming_size <= 8000:
+            raise HTTPException(status_code=422, detail="默认分段大小必须在 200 到 8000 之间")
+        incoming["default_chunk_size"] = incoming_size
+    if "default_chunk_overlap" in incoming:
+        try:
+            incoming_overlap = int(incoming["default_chunk_overlap"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="默认重叠长度必须是整数") from exc
+        if incoming_overlap < 0:
+            raise HTTPException(status_code=422, detail="默认重叠长度不能为负数")
+        incoming["default_chunk_overlap"] = incoming_overlap
+    size = int(incoming.get("default_chunk_size", current["default_chunk_size"]))
+    overlap = int(incoming.get("default_chunk_overlap", current["default_chunk_overlap"]))
+    if overlap >= size:
+        raise HTTPException(status_code=422, detail="默认重叠长度必须小于分段大小")
+    for key in ("allow_user_agent_create", "allow_user_workflow_create", "maintenance_mode"):
+        if key in incoming and not isinstance(incoming[key], bool):
+            raise HTTPException(status_code=422, detail=f"{key} 必须是布尔值")
+    for key in ("default_workspace_id", "default_model_provider_id", "default_knowledge_base_id", "welcome_message"):
+        if key in incoming and not isinstance(incoming[key], str):
+            raise HTTPException(status_code=422, detail=f"{key} 必须是字符串")
+    if body.name is not None:
+        tenant.name = body.name.strip()
+    policy = await tenant_policy(db, ctx.tenant_id)
+    policy.pricing_json = {**(policy.pricing_json or {}), "platform_settings": {**current, **incoming}}
+    await audit(db, ctx, "tenant.platform_settings.update", "tenant", tenant.id, {"name": body.name, "settings": incoming})
+    await db.commit()
+    return platform_settings_payload(tenant, policy)
 
 
 @app.get("/api/admin/identity/status")

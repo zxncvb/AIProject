@@ -371,6 +371,11 @@ class TenantPolicyUpdate(BaseModel):
     pricing: dict[str, Any] = Field(default_factory=dict)
 
 
+class PlatformSettingsUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=160)
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
 class PublicAppInvokeRequest(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
 

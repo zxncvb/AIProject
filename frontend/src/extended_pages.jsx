@@ -253,6 +253,44 @@ export function ApprovalCenter() {
   return <div className="page"><Title title="审批中心" description="统一处理资源上架、渠道发布和高权限操作申请。"/><div className="two-col"><Box title="审批申请" subtitle={`${items.length} 条`}><div className="table"><div className="table-head"><span>申请内容</span><span>类型</span><span>状态</span><span>操作</span></div>{items.map((item) => <div className="table-row" key={item.id}><b>{item.title}</b><span>{item.type}</span><Tag>{item.status}</Tag><div className="button-row">{item.status === "pending" && <><button onClick={() => decide(item.id, true)}>通过</button><button onClick={() => decide(item.id, false)}>拒绝</button></>}</div></div>)}</div>{!items.length && <div className="empty">暂无审批申请。</div>}</Box><Box title="发起申请" subtitle="可申请资源发布、渠道接入等高权限操作"><form className="form-grid" onSubmit={submit}><label>申请标题<input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })}/></label><label>申请类型<select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}><option value="resource.publish">资源发布</option><option value="channel.publish">渠道发布</option><option value="plugin.approve">插件审批</option></select></label><label>资源 ID<input value={form.resource_id} onChange={(e) => setForm({ ...form, resource_id: e.target.value })}/></label><button className="primary">提交申请</button></form></Box></div><Note>{message}</Note></div>;
 }
 
+export function PlatformSettings({ data }) {
+  const [form, setForm] = useState({ name: "", slug: "", is_active: true, default_workspace_id: "", default_model_provider_id: "", default_knowledge_base_id: "", default_chunking_mode: "auto", default_chunk_size: 1200, default_chunk_overlap: 160, allow_user_agent_create: true, allow_user_workflow_create: true, maintenance_mode: false, welcome_message: "欢迎使用企业 AI 中台" });
+  const [workspaces, setWorkspaces] = useState([]);
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(true);
+  async function load() {
+    try {
+      const [res, workspaceRes] = await Promise.all([api.get("/api/admin/platform-settings"), api.get("/api/workspaces")]);
+      const settings = res.data.settings || {};
+      setWorkspaces(workspaceRes.data || []);
+      setForm({ name: res.data.name || "", slug: res.data.slug || "", is_active: res.data.is_active !== false, ...settings });
+    } catch (err) { setMessage(errorText(err, "平台设置读取失败")); }
+    finally { setLoading(false); }
+  }
+  useEffect(() => { load(); }, []);
+  function update(key, value) { setForm((current) => ({ ...current, [key]: value })); }
+  async function save(event) {
+    event.preventDefault(); setMessage("");
+    try {
+      const payload = { name: form.name, settings: { default_workspace_id: form.default_workspace_id || "", default_model_provider_id: form.default_model_provider_id || "", default_knowledge_base_id: form.default_knowledge_base_id || "", default_chunking_mode: form.default_chunking_mode, default_chunk_size: Number(form.default_chunk_size), default_chunk_overlap: Number(form.default_chunk_overlap), allow_user_agent_create: Boolean(form.allow_user_agent_create), allow_user_workflow_create: Boolean(form.allow_user_workflow_create), maintenance_mode: Boolean(form.maintenance_mode), welcome_message: form.welcome_message || "" } };
+      const res = await api.patch("/api/admin/platform-settings", payload);
+      const settings = res.data.settings || {};
+      setForm({ name: res.data.name || "", slug: res.data.slug || "", is_active: res.data.is_active !== false, ...settings });
+      setMessage("平台设置已保存");
+    } catch (err) { setMessage(errorText(err, "平台设置保存失败")); }
+  }
+  if (loading) return <div className="page"><Title title="平台设置" description="配置企业 AI 中台的基础信息、默认能力和治理开关。"/><div className="empty">正在读取平台设置…</div></div>;
+  return <div className="page"><Title title="平台设置" description="配置企业 AI 中台的基础信息、默认能力和治理开关。" actions={<button className="primary" onClick={save}>保存设置</button>}/><form onSubmit={save}>
+    <div className="two-col">
+      <Box title="企业信息" subtitle="平台管理员可修改企业名称，标识信息仅供查看"><div className="form-grid"><label>企业名称<input value={form.name} onChange={(e) => update("name", e.target.value)} minLength="2" maxLength="160" required/></label><label>企业标识<input value={form.slug} readOnly/></label><label>平台状态<input value={form.is_active ? "正常运行" : "已停用"} readOnly/></label><label>欢迎语<textarea value={form.welcome_message} onChange={(e) => update("welcome_message", e.target.value)} maxLength="240"/></label></div></Box>
+      <Box title="默认 AI 能力" subtitle="用于新建知识库、Agent 和工作流时的默认选择"><div className="form-grid"><label>默认工作区<select value={form.default_workspace_id || ""} onChange={(e) => update("default_workspace_id", e.target.value)}><option value="">不指定</option>{workspaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>默认模型<select value={form.default_model_provider_id || ""} onChange={(e) => update("default_model_provider_id", e.target.value)}><option value="">不指定</option>{(data?.models || []).map((item) => <option key={item.id} value={item.id}>{item.name} / {item.default_model}</option>)}</select></label><label>默认知识库<select value={form.default_knowledge_base_id || ""} onChange={(e) => update("default_knowledge_base_id", e.target.value)}><option value="">不指定</option>{(data?.kbs || []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>默认分段模式<select value={form.default_chunking_mode} onChange={(e) => update("default_chunking_mode", e.target.value)}><option value="auto">自动分段</option><option value="custom">自定义分段</option></select></label><label>默认分段大小<input type="number" min="200" max="8000" value={form.default_chunk_size} onChange={(e) => update("default_chunk_size", e.target.value)}/></label><label>默认重叠长度<input type="number" min="0" value={form.default_chunk_overlap} onChange={(e) => update("default_chunk_overlap", e.target.value)}/></label></div></Box>
+    </div>
+    <Box title="平台能力开关" subtitle="控制普通成员是否可以创建资源，以及平台是否进入维护状态"><div className="settings-checks"><label><input type="checkbox" checked={Boolean(form.allow_user_agent_create)} onChange={(e) => update("allow_user_agent_create", e.target.checked)}/> 允许普通成员创建 Agent</label><label><input type="checkbox" checked={Boolean(form.allow_user_workflow_create)} onChange={(e) => update("allow_user_workflow_create", e.target.checked)}/> 允许普通成员创建工作流</label><label className="warning-check"><input type="checkbox" checked={Boolean(form.maintenance_mode)} onChange={(e) => update("maintenance_mode", e.target.checked)}/> 开启维护模式</label></div></Box>
+    <div className="page-actions"><button className="primary" type="submit">保存平台设置</button></div>
+  </form><Note>{message}</Note></div>;
+}
+
+
 export function PlatformConsole() {
   const [summary, setSummary] = useState(null); const [series, setSeries] = useState([]); const [policy, setPolicy] = useState({ safety: { mode: "redact", max_input_chars: 12000, block_prompt_injection: true }, pricing: { currency: "CNY", monthly_budget: 0 } }); const [identity, setIdentity] = useState(null); const [rules, setRules] = useState([]); const [message, setMessage] = useState(""); const [rule, setRule] = useState({ name: "高风险问题统一口径", match_mode: "keyword", match_content: "密码|密钥", preset_reply: "请联系企业管理员获取帮助。", priority: 100, enabled: true });
   async function load() { try { const [s, p, i, r, a] = await Promise.all([api.get("/api/admin/analytics/summary"), api.get("/api/admin/policy"), api.get("/api/admin/identity/status"), api.get("/api/intervention-rules"), api.get("/api/admin/analytics/series?days=30")]); setSummary(s.data); setPolicy({ safety: s.data.safety || p.data.safety || policy.safety, pricing: p.data.pricing || policy.pricing }); setIdentity(i.data); setRules(r.data); setSeries(a.data.series || []); } catch (err) { setMessage(errorText(err, "平台管理数据读取失败")); } } useEffect(() => { load(); }, []);
