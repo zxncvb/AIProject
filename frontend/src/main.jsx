@@ -40,6 +40,7 @@ function Login({ onLogin }) {
   const [password, setPassword] = useState("");
   const [mfaCode, setMfaCode] = useState("");
   const [error, setError] = useState("");
+  const platformName = localStorage.getItem("eai_tenant_name") || "企业 AI 中台";
   async function submit(event) {
     event.preventDefault();
     setError("");
@@ -66,8 +67,8 @@ function Login({ onLogin }) {
   }
   return <main className="login-page"><form className="login-card" onSubmit={submit}>
     <div className="button-row"><button type="button" onClick={oidcLogin}>企业单点登录</button><button type="button" onClick={ldapLogin}>LDAP 登录</button></div>
-    <div className="brand-mark">AI</div><div className="login-kicker">ENTERPRISE AI PLATFORM</div>
-    <h1>企业 AI 中台</h1><p className="muted">统一管理模型、智能体、工作流、知识与企业权限。</p>
+     <div className="brand-mark">AI</div><div className="login-kicker">ENTERPRISE AI PLATFORM</div>
+     <h1>{platformName}</h1><p className="muted">统一管理模型、智能体、工作流、知识与企业权限。</p>
     <label>账号<input value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" /></label>
     <label>密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" /></label>
     <label>多因素验证码 <span className="label-hint">启用 MFA 后填写</span><input inputMode="numeric" value={mfaCode} onChange={(e) => setMfaCode(e.target.value)} placeholder="6 位验证码" /></label>
@@ -202,8 +203,8 @@ const workspaceNav = [["overview", "工作台", "⌂"], ["agents", "Agent", "✦
 const adminNav = [["members", "成员与权限", "♙"], ["publishing", "发布管理", "↗"], ["platform-settings", "平台设置", "⚙"], ["security", "安全与身份", "盾"], ["audit", "审计日志", "≡"]];
 
 function Layout({ me, page, setPage, onLogout, children }) {
-  const current = [...workspaceNav, ...adminNav].find((item) => item[0] === page); const [workspaceName, setWorkspaceName] = useState(me?.tenant?.name || "示例企业"); const [platformName, setPlatformName] = useState(me?.tenant?.name || "企业 AI 中台");
-  useEffect(() => { setPlatformName(me?.tenant?.name || "企业 AI 中台"); api.get("/api/workspaces").then((res) => { const selected = localStorage.getItem("eai_workspace_id"); const item = res.data.find((space) => space.id === selected) || res.data[0]; if (item) { setWorkspaceName(item.name); localStorage.setItem("eai_workspace_id", item.id); } }).catch(() => {}); const onChange = (event) => setWorkspaceName(event.detail?.name || ""); const onTenantChange = (event) => { if (event.detail?.name) setPlatformName(event.detail.name); }; window.addEventListener("workspace-change", onChange); window.addEventListener("tenant-name-change", onTenantChange); return () => { window.removeEventListener("workspace-change", onChange); window.removeEventListener("tenant-name-change", onTenantChange); }; }, [me?.tenant?.name]);
+  const current = [...workspaceNav, ...adminNav].find((item) => item[0] === page); const [workspaceName, setWorkspaceName] = useState(me?.tenant?.name || "示例企业"); const [platformName, setPlatformName] = useState(() => localStorage.getItem("eai_tenant_name") || me?.tenant?.name || "企业 AI 中台");
+  useEffect(() => { const name = me?.tenant?.name || localStorage.getItem("eai_tenant_name") || "企业 AI 中台"; setPlatformName(name); localStorage.setItem("eai_tenant_name", name); api.get("/api/workspaces").then((res) => { const selected = localStorage.getItem("eai_workspace_id"); const item = res.data.find((space) => space.id === selected) || res.data[0]; if (item) { setWorkspaceName(item.name); localStorage.setItem("eai_workspace_id", item.id); } }).catch(() => {}); const onChange = (event) => setWorkspaceName(event.detail?.name || ""); const onTenantChange = (event) => { if (event.detail?.name) { setPlatformName(event.detail.name); localStorage.setItem("eai_tenant_name", event.detail.name); } }; window.addEventListener("workspace-change", onChange); window.addEventListener("tenant-name-change", onTenantChange); return () => { window.removeEventListener("workspace-change", onChange); window.removeEventListener("tenant-name-change", onTenantChange); }; }, [me?.tenant?.name]);
   useEffect(() => { document.title = platformName || "企业 AI 中台"; }, [platformName]);
   return <div className="shell"><aside>
      <div className="logo"><span>AI</span><div><b>{platformName}</b><small>Enterprise AI Platform</small></div></div>

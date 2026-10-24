@@ -277,6 +277,7 @@ export function PlatformSettings({ data }) {
       const settings = res.data.settings || {};
       const savedName = res.data.name || "";
       setForm({ name: savedName, slug: res.data.slug || "", is_active: res.data.is_active !== false, ...settings });
+      localStorage.setItem("eai_tenant_name", savedName);
       window.dispatchEvent(new CustomEvent("tenant-name-change", { detail: { name: savedName } }));
       setMessage("平台设置已保存");
     } catch (err) { setMessage(errorText(err, "平台设置保存失败")); }
